@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { reanalyze, listRagas } from "@/lib/api";
+import { AdvancedOptions } from "@/components/upload/AdvancedOptions";
 
 const TONIC_OPTIONS = [
   "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -24,6 +25,8 @@ export function CorrectionBar({ songId, currentTonic, currentRaga }: CorrectionB
   const [vocalistGender, setVocalistGender] = useState("");
   const [ragaList, setRagaList] = useState<string[]>([]);
   const [ragaDropdownOpen, setRagaDropdownOpen] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [advancedParams, setAdvancedParams] = useState<Record<string, unknown>>({});
   const [submitting, setSubmitting] = useState(false);
 
   const fetchRagas = useCallback(async () => {
@@ -55,6 +58,7 @@ export function CorrectionBar({ songId, currentTonic, currentRaga }: CorrectionB
         raga: raga || undefined,
         instrument,
         vocalistGender: vocalistGender || undefined,
+        ...advancedParams,
       });
       router.push("/library");
     } catch (err) {
@@ -229,6 +233,14 @@ export function CorrectionBar({ songId, currentTonic, currentRaga }: CorrectionB
               </div>
             )}
           </div>
+
+          {/* Advanced options */}
+          <button type="button" onClick={() => setShowAdvanced(!showAdvanced)} className="text-text-muted text-xs flex items-center gap-1.5">
+            <span className="text-[10px]">{showAdvanced ? "\u25BC" : "\u25B6"}</span> Advanced options
+          </button>
+          {showAdvanced && (
+            <AdvancedOptions mode="analyze" onChange={setAdvancedParams} />
+          )}
 
           {/* Submit button */}
           <div className="flex justify-end">

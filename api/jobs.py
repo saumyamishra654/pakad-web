@@ -108,6 +108,18 @@ def _run_pipeline(job: Job) -> None:
     if params.get("vocalistGender"):
         cmd += ["--vocalist-gender", params["vocalistGender"]]
 
+    # Pass all additional advanced params as CLI flags
+    HANDLED_PARAMS = {"tonic", "raga", "instrument", "vocalistGender", "vocalist_gender"}
+    for key, value in params.items():
+        if key in HANDLED_PARAMS or value is None or value == "":
+            continue
+        flag = f"--{key.replace('_', '-')}"
+        if isinstance(value, bool):
+            if value:
+                cmd.append(flag)
+        else:
+            cmd += [flag, str(value)]
+
     # Run detect
     _update_job(job.id, status="running", progress=0.1)
     _log(job.id, f"[2/4 Detect] Running: {' '.join(cmd)}")
@@ -158,6 +170,16 @@ def _run_pipeline(job: Job) -> None:
     # Build analyze command
     cmd_analyze = ["python", "driver.py", "analyze", "--audio", audio_path, "--output", artifact_base,
                    "--tonic", detected_tonic, "--raga", detected_raga]
+    # Pass advanced params to analyze too
+    for key, value in params.items():
+        if key in HANDLED_PARAMS or value is None or value == "":
+            continue
+        flag = f"--{key.replace('_', '-')}"
+        if isinstance(value, bool):
+            if value:
+                cmd_analyze.append(flag)
+        else:
+            cmd_analyze += [flag, str(value)]
 
     # Run analyze
     _log(job.id, f"[3/4 Analyze] Running: {' '.join(cmd_analyze)}")

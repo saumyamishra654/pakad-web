@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ProtectedRoute } from "@/components/layout/ProtectedRoute";
 import { Header } from "@/components/layout/Header";
 import { FileDropZone } from "@/components/upload/FileDropZone";
+import { AdvancedOptions } from "@/components/upload/AdvancedOptions";
 import { uploadFile, uploadYoutube, checkYoutubeExists, listRagas } from "@/lib/api";
 import Link from "next/link";
 
@@ -25,6 +26,7 @@ function UploadForm() {
   const [songType, setSongType] = useState("");
   const [visibility, setVisibility] = useState("private");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [advancedParams, setAdvancedParams] = useState<Record<string, unknown>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [ragas, setRagas] = useState<string[]>([]);
@@ -74,6 +76,10 @@ function UploadForm() {
         if (raga) formData.append("raga", raga);
         formData.append("instrument", instrument);
         if (vocalistGender) formData.append("vocalist_gender", vocalistGender);
+        // Append advanced params
+        for (const [k, v] of Object.entries(advancedParams)) {
+          if (v !== null && v !== undefined && v !== "") formData.append(k, String(v));
+        }
         await uploadFile(formData);
       } else {
         if (!youtubeUrl) { setError("Please enter a YouTube URL"); setSubmitting(false); return; }
@@ -85,6 +91,9 @@ function UploadForm() {
         if (raga) formData.append("raga", raga);
         formData.append("instrument", instrument);
         if (vocalistGender) formData.append("vocalist_gender", vocalistGender);
+        for (const [k, v] of Object.entries(advancedParams)) {
+          if (v !== null && v !== undefined && v !== "") formData.append(k, String(v));
+        }
         await uploadYoutube(formData);
       }
       router.push("/library");
@@ -215,9 +224,7 @@ function UploadForm() {
           <span className="text-[10px]">{showAdvanced ? "\u25BC" : "\u25B6"}</span> Advanced options
         </button>
         {showAdvanced && (
-          <div className="bg-bg-card border border-border rounded-lg p-4 text-text-muted text-xs">
-            Advanced options (separator model, confidence thresholds) will be available in a future update.
-          </div>
+          <AdvancedOptions mode="detect" onChange={setAdvancedParams} />
         )}
 
         {error && <p className="text-status-error text-sm">{error}</p>}
