@@ -110,27 +110,64 @@ def _run_pipeline(job: Job) -> None:
     _update_job(job.id, status="running", progress=0.1)
     _log(job.id, f"[2/4 Detect] Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
+    if result.stdout:
+        for line in result.stdout.strip().split("\n"):
+            _log(job.id, f"[2/4 Detect] stdout: {line}")
     if result.returncode != 0:
         _log(job.id, f"[2/4 Detect] FAILED (exit code {result.returncode})")
-        _log(job.id, f"[2/4 Detect] stderr: {result.stderr[:2000]}")
+        if result.stderr:
+            for line in result.stderr.strip().split("\n")[:20]:
+                _log(job.id, f"[2/4 Detect] stderr: {line}")
         raise RuntimeError(f"Detect failed: {result.stderr[:1000]}")
     _log(job.id, f"[2/4 Detect] Complete")
+
+    _update_job(job.id, progress=0.5)
+
+    # Parse detect results from meta.json to get tonic/raga for analyze
+    import json, glob
+    meta_files = glob.glob(f"{artifact_base}/**/detection_report.meta.json", recursive=True)
+    detected_tonic = params.get("tonic")
+    detected_raga = params.get("raga")
+    if meta_files:
+        with open(meta_files[0]) as f:
+            meta = json.load(f)
+        det = meta.get("detected", {})
+        _log(job.id, f"[2/4 Detect] Meta detected: {json.dumps(det)}")
+        if not detected_tonic and det.get("top_tonic_name"):
+            detected_tonic = det["top_tonic_name"]
+        if not detected_raga and det.get("top_raga"):
+            detected_raga = det["top_raga"]
+    _log(job.id, f"[2/4 Detect] Resolved tonic={detected_tonic}, raga={detected_raga}")
+
+    # If no tonic/raga detected, we can't run analyze
+    if not detected_tonic or not detected_raga:
+        _log(job.id, f"[3/4 Analyze] SKIPPED - no tonic/raga detected. User must specify manually.")
+        _update_job(job.id, progress=0.9)
+        firestore_client.update_song(job.song_id, status="complete")
+        firestore_client.update_analysis(job.song_id, job.analysis_id,
+            status="complete",
+            results={"detectedRaga": detected_raga, "detectedTonic": detected_tonic,
+                     "confidence": 0, "candidateRagas": [], "needsManualInput": True},
+            artifactPaths={"outputDir": artifact_base})
+        return
 
     _update_job(job.id, progress=0.6)
 
     # Build analyze command
-    cmd_analyze = ["python", "driver.py", "analyze", "--audio", audio_path, "--output", artifact_base]
-    if params.get("tonic"):
-        cmd_analyze += ["--tonic", params["tonic"]]
-    if params.get("raga"):
-        cmd_analyze += ["--raga", params["raga"]]
+    cmd_analyze = ["python", "driver.py", "analyze", "--audio", audio_path, "--output", artifact_base,
+                   "--tonic", detected_tonic, "--raga", detected_raga]
 
     # Run analyze
     _log(job.id, f"[3/4 Analyze] Running: {' '.join(cmd_analyze)}")
     result = subprocess.run(cmd_analyze, capture_output=True, text=True, timeout=3600, env=env)
+    if result.stdout:
+        for line in result.stdout.strip().split("\n"):
+            _log(job.id, f"[3/4 Analyze] stdout: {line}")
     if result.returncode != 0:
         _log(job.id, f"[3/4 Analyze] FAILED (exit code {result.returncode})")
-        _log(job.id, f"[3/4 Analyze] stderr: {result.stderr[:2000]}")
+        if result.stderr:
+            for line in result.stderr.strip().split("\n")[:20]:
+                _log(job.id, f"[3/4 Analyze] stderr: {line}")
         raise RuntimeError(f"Analyze failed: {result.stderr[:1000]}")
     _log(job.id, f"[3/4 Analyze] Complete")
 
@@ -139,9 +176,10 @@ def _run_pipeline(job: Job) -> None:
     # Update Firestore
     _log(job.id, f"[4/4 Finalize] Updating Firestore status -> complete")
     firestore_client.update_song(job.song_id, status="complete")
-    firestore_client.update_analysis(job.song_id, job.analysis_id, status="complete", artifactPaths={
-        "outputDir": artifact_base,
-    })
+    firestore_client.update_analysis(job.song_id, job.analysis_id,
+        status="complete",
+        results={"detectedRaga": detected_raga, "detectedTonic": detected_tonic},
+        artifactPaths={"outputDir": artifact_base})
 
     # Cleanup YouTube temp files
     if source == "youtube":
