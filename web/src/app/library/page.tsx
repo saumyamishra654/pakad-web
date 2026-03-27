@@ -22,7 +22,7 @@ const filters = [
 
 export default function LibraryPage() {
   const router = useRouter();
-  const { songs, totalCount, loading, error, search, setSearch, filter, setFilter } = useLibrary();
+  const { songs, totalCount, loading, error, search, setSearch, filter, setFilter, refresh } = useLibrary();
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     if (typeof window !== "undefined") {
       return (localStorage.getItem("raga_view_mode") as ViewMode) || "grid";
