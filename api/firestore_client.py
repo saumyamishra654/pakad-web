@@ -6,6 +6,7 @@ from typing import Optional
 import uuid
 
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 from google.oauth2 import service_account
 
 _db: Optional[firestore.Client] = None
@@ -60,8 +61,8 @@ def find_song_by_youtube_id(video_id: str) -> Optional[dict]:
     db = get_db()
     docs = (
         db.collection("songs")
-        .where("youtubeVideoId", "==", video_id)
-        .where("visibility", "==", "public")
+        .where(filter=FieldFilter("youtubeVideoId", "==", video_id))
+        .where(filter=FieldFilter("visibility", "==", "public"))
         .limit(1)
         .get()
     )
@@ -76,7 +77,7 @@ def list_user_songs(user_id: str) -> list[dict]:
     db = get_db()
     docs = (
         db.collection("songs")
-        .where("uploadedBy", "==", user_id)
+        .where(filter=FieldFilter("uploadedBy", "==", user_id))
         .order_by("createdAt", direction=firestore.Query.DESCENDING)
         .get()
     )
@@ -92,9 +93,9 @@ def list_public_songs(
     order_by: str = "createdAt", song_type: Optional[str] = None, limit: int = 50,
 ) -> list[dict]:
     db = get_db()
-    query = db.collection("songs").where("visibility", "==", "public")
+    query = db.collection("songs").where(filter=FieldFilter("visibility", "==", "public"))
     if song_type:
-        query = query.where("songType", "==", song_type)
+        query = query.where(filter=FieldFilter("songType", "==", song_type))
     query = query.order_by(order_by, direction=firestore.Query.DESCENDING).limit(limit)
     docs = query.get()
     results = []
@@ -149,7 +150,7 @@ def get_canonical_analysis(song_id: str) -> Optional[dict]:
     # Try moderator first
     docs = (
         db.collection("songs").document(song_id)
-        .collection("analyses").where("type", "==", "moderator")
+        .collection("analyses").where(filter=FieldFilter("type", "==", "moderator"))
         .limit(1).get()
     )
     for doc in docs:
@@ -160,7 +161,7 @@ def get_canonical_analysis(song_id: str) -> Optional[dict]:
     # Fall back to canonical
     docs = (
         db.collection("songs").document(song_id)
-        .collection("analyses").where("type", "==", "canonical")
+        .collection("analyses").where(filter=FieldFilter("type", "==", "canonical"))
         .limit(1).get()
     )
     for doc in docs:
