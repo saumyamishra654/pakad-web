@@ -74,11 +74,21 @@ export default function SongResultsPage() {
 
         {/* Karaoke transcription */}
         {data.transcription.length > 0 && (
-          <KaraokeTranscription
-            notes={data.transcription}
-            currentTime={player.currentTime}
-            onSeek={player.seek}
-          />
+          <>
+            <KaraokeTranscription
+              notes={data.transcription}
+              currentTime={player.currentTime}
+              onSeek={player.seek}
+            />
+            <div className="mb-8 -mt-4">
+              <Link
+                href={`/song/${songId}/edit`}
+                className="inline-flex items-center gap-1.5 text-accent text-sm hover:underline transition-colors"
+              >
+                Edit Transcription &#8594;
+              </Link>
+            </div>
+          </>
         )}
 
         {/* Pattern analysis */}
