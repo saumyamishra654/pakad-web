@@ -61,23 +61,23 @@ export function AdvancedOptions({
       .catch(() => setLoading(false));
   }, [mode]);
 
+  // Sync changed (non-default) values to parent via useEffect
+  useEffect(() => {
+    const changed: Record<string, unknown> = {};
+    for (const f of fields) {
+      const v = values[f.name];
+      if (v !== undefined && v !== null && v !== "" && v !== f.default) {
+        changed[f.name] = v;
+      }
+    }
+    onChange(changed);
+  }, [values, fields, onChange]);
+
   const handleChange = useCallback(
     (name: string, value: unknown) => {
-      setValues((prev) => {
-        const next = { ...prev, [name]: value };
-        // Only send non-default values to parent
-        const changed: Record<string, unknown> = {};
-        for (const f of fields) {
-          const v = next[f.name];
-          if (v !== undefined && v !== null && v !== "" && v !== f.default) {
-            changed[f.name] = v;
-          }
-        }
-        onChange(changed);
-        return next;
-      });
+      setValues((prev) => ({ ...prev, [name]: value }));
     },
-    [fields, onChange]
+    []
   );
 
   function isFieldVisible(field: SchemaField): boolean {
@@ -123,31 +123,30 @@ export function AdvancedOptions({
 
             {!isBool && field.choices && field.choices.length > 0 ? (
               <select
-                value={(value as string) ?? ""}
+                value={(value as string) ?? (field.default as string) ?? ""}
                 onChange={(e) => handleChange(field.name, e.target.value || null)}
                 className="w-full bg-bg-elevated border border-border rounded-md px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
               >
-                <option value="">{field.default != null ? String(field.default) : "default"}</option>
                 {field.choices.map((c) => (
-                  <option key={c} value={c}>{c}</option>
+                  <option key={c} value={c}>{c}{c === String(field.default) ? " (default)" : ""}</option>
                 ))}
               </select>
             ) : !isBool && field.value_type === "int" ? (
               <input
                 type="number"
                 step="1"
-                value={(value as number) ?? ""}
+                value={value != null ? String(value) : ""}
                 onChange={(e) => handleChange(field.name, e.target.value ? parseInt(e.target.value) : null)}
-                placeholder={field.default != null ? String(field.default) : ""}
+                placeholder={field.default != null ? `${field.default} (default)` : ""}
                 className="w-full bg-bg-elevated border border-border rounded-md px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
               />
             ) : !isBool && field.value_type === "float" ? (
               <input
                 type="number"
                 step="any"
-                value={(value as number) ?? ""}
+                value={value != null ? String(value) : ""}
                 onChange={(e) => handleChange(field.name, e.target.value ? parseFloat(e.target.value) : null)}
-                placeholder={field.default != null ? String(field.default) : ""}
+                placeholder={field.default != null ? `${field.default} (default)` : ""}
                 className="w-full bg-bg-elevated border border-border rounded-md px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
               />
             ) : !isBool ? (
@@ -155,7 +154,7 @@ export function AdvancedOptions({
                 type="text"
                 value={(value as string) ?? ""}
                 onChange={(e) => handleChange(field.name, e.target.value || null)}
-                placeholder={field.default != null ? String(field.default) : ""}
+                placeholder={field.default != null ? `${field.default} (default)` : ""}
                 className="w-full bg-bg-elevated border border-border rounded-md px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
               />
             ) : null}
