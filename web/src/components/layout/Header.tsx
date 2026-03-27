@@ -15,7 +15,23 @@ export function Header() {
     router.push("/");
   }
 
-  if (!user) return null;
+  if (!user) {
+    return (
+      <header className="flex items-center justify-between px-6 py-4 border-b border-border">
+        <Link href="/" className="text-xl font-semibold text-text-primary">
+          Pakad
+        </Link>
+        <nav className="flex items-center gap-6">
+          <Link href="/explore" className="text-text-secondary hover:text-text-primary transition-colors text-sm">
+            Explore
+          </Link>
+          <Link href="/" className="text-accent hover:opacity-90 text-sm font-medium transition-opacity">
+            Sign in
+          </Link>
+        </nav>
+      </header>
+    );
+  }
 
   const initials = (user.displayName || user.email || "U")
     .split(" ")
