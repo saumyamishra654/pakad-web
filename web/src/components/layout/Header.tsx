@@ -27,7 +27,7 @@ export function Header() {
   return (
     <header className="flex items-center justify-between px-6 py-4 border-b border-border">
       <Link href="/library" className="text-xl font-semibold text-text-primary">
-        Raga Detection
+        Pakad
       </Link>
       <nav className="flex items-center gap-6">
         <Link href="/library" className="text-text-secondary hover:text-text-primary transition-colors text-sm">

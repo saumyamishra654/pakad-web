@@ -3,7 +3,7 @@ import "./globals.css";
 import { AuthProvider } from "@/components/layout/AuthProvider";
 
 export const metadata: Metadata = {
-  title: "Raga Detection",
+  title: "Pakad",
   description: "Identify and study Hindustani ragas in audio recordings",
 };
 
