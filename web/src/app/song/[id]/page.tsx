@@ -5,6 +5,10 @@ import { Header } from "@/components/layout/Header";
 import { HeroSection } from "@/components/results/HeroSection";
 import { RagaContext } from "@/components/results/RagaContext";
 import { AudioPlayer } from "@/components/results/AudioPlayer";
+import { PitchContour } from "@/components/results/PitchContour";
+import { KaraokeTranscription } from "@/components/results/KaraokeTranscription";
+import { Histogram } from "@/components/results/Histogram";
+import { TransitionMatrix } from "@/components/results/TransitionMatrix";
 import { useResults } from "@/hooks/useResults";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import Link from "next/link";
@@ -43,27 +47,29 @@ export default function SongResultsPage() {
           </div>
         )}
 
-        {/* Audio player with stem toggles */}
+        {/* Pitch Analysis: player + interactive contour */}
         {Object.keys(data.stems).length > 0 && (
           <div className="mb-8">
             <h2 className="text-base font-semibold text-text-primary mb-3">Pitch Analysis</h2>
             <AudioPlayer stems={data.stems} {...player} />
+            <PitchContour
+              songId={songId}
+              stem={player.activeStem}
+              tonicMidi={data.detection.tonicMidi}
+              currentTime={player.currentTime}
+              duration={player.duration}
+              onSeek={player.seek}
+            />
           </div>
         )}
 
-        {/* Transcription (simple for now - Task 4 replaces with karaoke) */}
+        {/* Karaoke transcription */}
         {data.transcription.length > 0 && (
-          <div className="mb-8">
-            <h2 className="text-base font-semibold text-text-primary mb-3">Transcription</h2>
-            <div className="bg-bg-card border border-border rounded-xl p-4 font-mono text-sm">
-              <div className="flex flex-wrap gap-1">
-                {data.transcription.slice(0, 200).map((note, i) => (
-                  <span key={i} className="text-text-secondary px-1">{note.sargam}</span>
-                ))}
-                {data.transcription.length > 200 && <span className="text-text-faint">... +{data.transcription.length - 200} more</span>}
-              </div>
-            </div>
-          </div>
+          <KaraokeTranscription
+            notes={data.transcription}
+            currentTime={player.currentTime}
+            onSeek={player.seek}
+          />
         )}
 
         {/* Candidates table */}
@@ -95,19 +101,17 @@ export default function SongResultsPage() {
           </div>
         )}
 
-        {/* Analysis images (fallback PNGs - will be replaced by interactive versions in Tasks 5+6) */}
-        {Object.keys(data.images).length > 0 && (
+        {/* Deep Analysis: histogram + transition matrix */}
+        {(data.histogram?.length > 0 || data.transitionMatrix?.notes?.length > 0) && (
           <div className="mb-8">
-            <h2 className="text-base font-semibold text-text-primary mb-3">Analysis Charts</h2>
+            <h2 className="text-base font-semibold text-text-primary mb-3">Deep Analysis</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {Object.entries(data.images).map(([name, url]) => (
-                <div key={name} className="bg-bg-card border border-border rounded-xl overflow-hidden">
-                  <div className="px-4 py-2.5 border-b border-border">
-                    <span className="text-text-secondary text-xs font-medium">{name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}</span>
-                  </div>
-                  <img src={url} alt={name} className="w-full" />
-                </div>
-              ))}
+              {data.histogram && data.histogram.length > 0 && (
+                <Histogram data={data.histogram} title="Note Duration Histogram" />
+              )}
+              {data.transitionMatrix && data.transitionMatrix.notes.length > 0 && (
+                <TransitionMatrix data={data.transitionMatrix} />
+              )}
             </div>
           </div>
         )}
