@@ -78,33 +78,42 @@ def _run_pipeline(job: Job) -> None:
     env = os.environ.copy()
 
     # Run detect
-    cmd = ["python", "driver.py", "detect", "--audio", audio_path, "--output-dir", artifact_base]
+    cmd = ["python", "driver.py", "detect", "--audio", audio_path, "--output", artifact_base]
     if params.get("tonic"):
         cmd += ["--tonic", params["tonic"]]
     if params.get("raga"):
         cmd += ["--raga", params["raga"]]
-    if params.get("instrument"):
-        cmd += ["--source-type", params["instrument"]]
+    instrument = params.get("instrument", "vocal")
+    if instrument and instrument != "vocal":
+        cmd += ["--source-type", "instrumental", "--instrument-type", instrument]
+    elif instrument == "vocal":
+        cmd += ["--source-type", "vocal"]
     if params.get("vocalistGender"):
         cmd += ["--vocalist-gender", params["vocalistGender"]]
 
     _update_job(job.id, status="running", progress=0.1)
+    print(f"[DEBUG] detect cmd: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
     if result.returncode != 0:
+        print(f"[DEBUG] detect stderr: {result.stderr[:2000]}")
         raise RuntimeError(f"Detect failed: {result.stderr[:1000]}")
+    print(f"[DEBUG] detect completed successfully")
 
     _update_job(job.id, progress=0.6)
 
     # Run analyze
-    cmd_analyze = ["python", "driver.py", "analyze", "--audio", audio_path, "--output-dir", artifact_base]
+    cmd_analyze = ["python", "driver.py", "analyze", "--audio", audio_path, "--output", artifact_base]
     if params.get("tonic"):
         cmd_analyze += ["--tonic", params["tonic"]]
     if params.get("raga"):
         cmd_analyze += ["--raga", params["raga"]]
 
+    print(f"[DEBUG] analyze cmd: {' '.join(cmd_analyze)}")
     result = subprocess.run(cmd_analyze, capture_output=True, text=True, timeout=3600, env=env)
     if result.returncode != 0:
+        print(f"[DEBUG] analyze stderr: {result.stderr[:2000]}")
         raise RuntimeError(f"Analyze failed: {result.stderr[:1000]}")
+    print(f"[DEBUG] analyze completed successfully")
 
     _update_job(job.id, progress=0.9)
 
