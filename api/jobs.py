@@ -39,13 +39,21 @@ def _update_job(job_id: str, **fields) -> None:
                 setattr(_jobs[job_id], k, v)
 
 
+def _log(job_id: str, msg: str) -> None:
+    print(f"[JOB {job_id[:8]}] {msg}")
+
+
 def _run_pipeline(job: Job) -> None:
+    _log(job.id, f"Starting pipeline for song={job.song_id[:8]}, analysis={job.analysis_id[:8]}")
+
     song = firestore_client.get_song(job.song_id)
     if not song:
         raise ValueError(f"Song {job.song_id} not found")
 
+    title = song.get("title", "untitled")
     audio_hash = song.get("audioHash", "")
     source = song.get("source", "file")
+    _log(job.id, f"Song: \"{title}\" | source={source} | hash={audio_hash}")
 
     # Determine audio file path
     if source == "youtube":
@@ -54,13 +62,17 @@ def _run_pipeline(job: Job) -> None:
             raise ValueError("No YouTube video ID")
         tmp = storage.ensure_dir(storage.tmp_dir(job.id))
         audio_path = str(tmp / "audio.mp3")
+        _log(job.id, f"[1/4 YouTube Download] Downloading video {video_id}...")
+        _update_job(job.id, status="running", progress=0.05)
         dl_result = subprocess.run(
             ["yt-dlp", "-x", "--audio-format", "mp3", "-o", audio_path,
              f"https://youtube.com/watch?v={video_id}"],
             capture_output=True, text=True, timeout=300,
         )
         if dl_result.returncode != 0:
+            _log(job.id, f"[1/4 YouTube Download] FAILED: {dl_result.stderr[:500]}")
             raise RuntimeError(f"YouTube download failed: {dl_result.stderr[:500]}")
+        _log(job.id, f"[1/4 YouTube Download] Complete -> {audio_path}")
     else:
         upload_base = storage.upload_dir(job.user_id, job.song_id)
         files = []
@@ -69,15 +81,18 @@ def _run_pipeline(job: Job) -> None:
         if not files:
             raise ValueError("No audio file found for this song")
         audio_path = str(storage.get_absolute_path(files[0]))
+        _log(job.id, f"[1/4 Audio Source] Using uploaded file: {audio_path}")
 
     analysis = firestore_client.get_analysis(job.song_id, job.analysis_id)
     params = analysis.get("params", {}) if analysis else {}
+    _log(job.id, f"Analysis params: tonic={params.get('tonic', 'auto')}, raga={params.get('raga', 'auto')}, instrument={params.get('instrument', 'vocal')}")
 
     artifact_base = str(storage.ensure_dir(storage.artifact_dir(audio_hash)))
+    _log(job.id, f"Artifact output dir: {artifact_base}")
 
     env = os.environ.copy()
 
-    # Run detect
+    # Build detect command
     cmd = ["python", "driver.py", "detect", "--audio", audio_path, "--output", artifact_base]
     if params.get("tonic"):
         cmd += ["--tonic", params["tonic"]]
@@ -91,33 +106,38 @@ def _run_pipeline(job: Job) -> None:
     if params.get("vocalistGender"):
         cmd += ["--vocalist-gender", params["vocalistGender"]]
 
+    # Run detect
     _update_job(job.id, status="running", progress=0.1)
-    print(f"[DEBUG] detect cmd: {' '.join(cmd)}")
+    _log(job.id, f"[2/4 Detect] Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
     if result.returncode != 0:
-        print(f"[DEBUG] detect stderr: {result.stderr[:2000]}")
+        _log(job.id, f"[2/4 Detect] FAILED (exit code {result.returncode})")
+        _log(job.id, f"[2/4 Detect] stderr: {result.stderr[:2000]}")
         raise RuntimeError(f"Detect failed: {result.stderr[:1000]}")
-    print(f"[DEBUG] detect completed successfully")
+    _log(job.id, f"[2/4 Detect] Complete")
 
     _update_job(job.id, progress=0.6)
 
-    # Run analyze
+    # Build analyze command
     cmd_analyze = ["python", "driver.py", "analyze", "--audio", audio_path, "--output", artifact_base]
     if params.get("tonic"):
         cmd_analyze += ["--tonic", params["tonic"]]
     if params.get("raga"):
         cmd_analyze += ["--raga", params["raga"]]
 
-    print(f"[DEBUG] analyze cmd: {' '.join(cmd_analyze)}")
+    # Run analyze
+    _log(job.id, f"[3/4 Analyze] Running: {' '.join(cmd_analyze)}")
     result = subprocess.run(cmd_analyze, capture_output=True, text=True, timeout=3600, env=env)
     if result.returncode != 0:
-        print(f"[DEBUG] analyze stderr: {result.stderr[:2000]}")
+        _log(job.id, f"[3/4 Analyze] FAILED (exit code {result.returncode})")
+        _log(job.id, f"[3/4 Analyze] stderr: {result.stderr[:2000]}")
         raise RuntimeError(f"Analyze failed: {result.stderr[:1000]}")
-    print(f"[DEBUG] analyze completed successfully")
+    _log(job.id, f"[3/4 Analyze] Complete")
 
     _update_job(job.id, progress=0.9)
 
     # Update Firestore
+    _log(job.id, f"[4/4 Finalize] Updating Firestore status -> complete")
     firestore_client.update_song(job.song_id, status="complete")
     firestore_client.update_analysis(job.song_id, job.analysis_id, status="complete", artifactPaths={
         "outputDir": artifact_base,
@@ -125,17 +145,23 @@ def _run_pipeline(job: Job) -> None:
 
     # Cleanup YouTube temp files
     if source == "youtube":
+        _log(job.id, f"[4/4 Finalize] Cleaning up temp YouTube audio")
         storage.cleanup_tmp(job.id)
+
+    _log(job.id, f"Pipeline finished successfully for \"{title}\"")
 
 
 def _worker() -> None:
     while True:
         job = _job_queue.get()
+        _log(job.id, f"Job dequeued, starting execution")
         try:
             _update_job(job.id, status="running", progress=0.0)
             _run_pipeline(job)
             _update_job(job.id, status="completed", progress=1.0)
+            _log(job.id, f"Job completed successfully")
         except Exception as e:
+            _log(job.id, f"Job FAILED: {e}")
             _update_job(job.id, status="failed", error=str(e))
             try:
                 firestore_client.update_song(job.song_id, status="failed")
