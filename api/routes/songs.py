@@ -22,6 +22,25 @@ async def get_song(song_id: str, user: Optional[dict] = Depends(get_optional_use
             raise HTTPException(status_code=403, detail="Access denied")
     return song
 
+@router.delete("/{song_id}")
+async def delete_song(song_id: str, user: dict = Depends(get_current_user)):
+    """Delete a song and its Firestore data. Only the owner can delete."""
+    from api.firestore_client import get_song as fs_get_song, get_db
+    song = fs_get_song(song_id)
+    if not song:
+        raise HTTPException(status_code=404, detail="Song not found")
+    if song["uploadedBy"] != user["uid"]:
+        raise HTTPException(status_code=403, detail="Only the owner can delete this song")
+    db = get_db()
+    # Delete subcollections (analyses, comments)
+    for sub in ["analyses", "comments"]:
+        docs = db.collection("songs").document(song_id).collection(sub).get()
+        for doc in docs:
+            doc.reference.delete()
+    # Delete the song document
+    db.collection("songs").document(song_id).delete()
+    return {"deleted": True}
+
 @router.get("/youtube/check/{video_id}")
 async def check_youtube_exists(video_id: str):
     from api.firestore_client import find_song_by_youtube_id

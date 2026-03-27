@@ -6,6 +6,7 @@ import uuid
 import traceback
 import subprocess
 import os
+from pathlib import Path
 from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass, field
@@ -93,7 +94,8 @@ def _run_pipeline(job: Job) -> None:
     env = os.environ.copy()
 
     # Build detect command
-    cmd = ["python", "driver.py", "detect", "--audio", audio_path, "--output", artifact_base]
+    raga_db = str(Path(__file__).parent.parent / "data" / "raga_list_final.csv")
+    cmd = ["python", "driver.py", "detect", "--audio", audio_path, "--output", artifact_base, "--raga-db", raga_db]
     if params.get("tonic"):
         cmd += ["--tonic", params["tonic"]]
     if params.get("raga"):

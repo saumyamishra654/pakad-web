@@ -94,7 +94,7 @@ export default function LibraryPage() {
         ) : error ? (
           <p className="text-status-error text-sm py-8 text-center">{error}</p>
         ) : viewMode === "grid" ? (
-          <LibraryGrid songs={songs} />
+          <LibraryGrid songs={songs} onDelete={refresh} />
         ) : (
           <SongList songs={songs} />
         )}

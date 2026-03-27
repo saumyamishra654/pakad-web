@@ -35,6 +35,11 @@ export async function getSong(songId: string) {
   return res.json();
 }
 
+export async function deleteSong(songId: string) {
+  const res = await apiFetch(`/api/songs/${songId}`, { method: "DELETE" });
+  return res.json();
+}
+
 export async function checkYoutubeExists(videoId: string) {
   const res = await apiFetch(`/api/songs/youtube/check/${videoId}`);
   return res.json();
