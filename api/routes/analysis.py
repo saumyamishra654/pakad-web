@@ -34,4 +34,9 @@ async def reanalyze(song_id: str, request: ReanalyzeRequest, user: dict = Depend
         params={"tonic": request.tonic, "raga": request.raga, "instrument": request.instrument, "vocalistGender": request.vocalist_gender},
         parent_analysis_id=canonical["id"],
     )
-    return {"analysisId": analysis_id, "status": "processing"}
+    from api.jobs import submit_job
+    job_id = submit_job(song_id, analysis_id, user["uid"], {
+        "tonic": request.tonic, "raga": request.raga,
+        "instrument": request.instrument, "vocalistGender": request.vocalist_gender,
+    })
+    return {"analysisId": analysis_id, "jobId": job_id, "status": "processing"}
