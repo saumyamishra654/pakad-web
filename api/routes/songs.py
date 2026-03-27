@@ -28,7 +28,25 @@ async def check_youtube_exists(video_id: str):
     existing = find_song_by_youtube_id(video_id)
     if existing:
         return {"exists": True, "songId": existing["id"], "title": existing["title"]}
-    return {"exists": False}
+    # Fetch title from YouTube for new videos
+    title = _fetch_youtube_title(video_id)
+    return {"exists": False, "title": title}
+
+
+def _fetch_youtube_title(video_id: str) -> Optional[str]:
+    """Fetch video title from YouTube using yt-dlp (no download)."""
+    import subprocess, json
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--dump-json", "--no-download", f"https://youtube.com/watch?v={video_id}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            return data.get("title")
+    except Exception:
+        pass
+    return None
 
 @router.post("/upload-file")
 async def upload_file(

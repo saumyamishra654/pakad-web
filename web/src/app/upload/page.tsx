@@ -54,7 +54,7 @@ function UploadForm() {
     const videoId = match[1];
     checkYoutubeExists(videoId).then((data) => {
       setYoutubePreview({ videoId, exists: data.exists, existingSongId: data.songId, existingTitle: data.title });
-      if (!title && data.exists && data.title) setTitle(data.title);
+      if (!title && data.title) setTitle(data.title);
     }).catch(() => { setYoutubePreview({ videoId, exists: false }); });
   }, [youtubeUrl, title]);
 

@@ -26,8 +26,19 @@ async def health():
 async def list_ragas():
     import csv
     from pathlib import Path
-    csv_path = Path(__file__).parent.parent / "raga_pipeline" / "data" / "raga_list_final.csv"
-    if not csv_path.exists():
+    base = Path(__file__).parent.parent
+    # Try multiple known locations for the raga CSV
+    candidates = [
+        base / "raga_pipeline" / "data" / "raga_list_final.csv",
+        base / "raga_pipeline" / "data" / "aarohavroha_subset.csv",
+        base / "main notebooks" / "raga_list_final.csv",
+    ]
+    csv_path = None
+    for c in candidates:
+        if c.exists():
+            csv_path = c
+            break
+    if not csv_path:
         return {"ragas": []}
     ragas = []
     with open(csv_path) as f:
