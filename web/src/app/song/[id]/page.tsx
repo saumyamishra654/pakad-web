@@ -61,6 +61,7 @@ export default function SongResultsPage() {
               duration={player.duration}
               isPlaying={player.isPlaying}
               onSeek={player.seek}
+              transcription={data.transcription}
             />
           </div>
         )}

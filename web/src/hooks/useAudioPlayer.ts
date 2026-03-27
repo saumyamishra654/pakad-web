@@ -19,7 +19,7 @@ export function useAudioPlayer() {
     return () => { audio.pause(); audio.src = ""; };
   }, []);
 
-  // 60fps RAF loop for currentTimeRef + 10Hz state updates
+  // 60fps RAF loop for currentTimeRef + 10Hz React state updates
   useEffect(() => {
     let rafId: number;
     let lastStateUpdate = 0;

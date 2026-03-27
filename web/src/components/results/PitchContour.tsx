@@ -8,7 +8,23 @@ interface PitchPoint {
   confidence: number;
 }
 
+interface TranscriptionNote {
+  start: number;
+  end: number;
+  sargam: string;
+  pitchMidi: number;
+  pitchHz: number;
+}
+
+interface Phrase {
+  startTime: number;
+  endTime: number;
+  notes: TranscriptionNote[];
+  index: number;
+}
+
 const SARGAM_LABELS = ["S", "r", "R", "g", "G", "m", "M", "P", "d", "D", "n", "N"];
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const PX_PER_SECOND = 50;
 const PLOT_HEIGHT = 400;
 const MARGIN = { top: 10, right: 15, bottom: 30, left: 0 };
@@ -16,6 +32,15 @@ const LABEL_WIDTH = 45;
 
 function freqToMidi(hz: number): number {
   return 12 * Math.log2(hz / 440) + 69;
+}
+
+function midiToNote(midi: number, tonic: number): string {
+  const semitone = ((Math.round(midi) - tonic) % 12 + 12) % 12;
+  return SARGAM_LABELS[semitone] || "";
+}
+
+function midiToWestern(midi: number): string {
+  return NOTE_NAMES[Math.round(midi) % 12] || "";
 }
 
 function formatTime(seconds: number): string {
@@ -32,6 +57,7 @@ export function PitchContour({
   duration,
   isPlaying,
   onSeek,
+  transcription,
 }: {
   songId: string;
   stem?: string;
@@ -40,9 +66,14 @@ export function PitchContour({
   duration: number;
   isPlaying: boolean;
   onSeek?: (time: number) => void;
+  transcription?: TranscriptionNote[];
 }) {
   const [points, setPoints] = useState<PitchPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hoverInfo, setHoverInfo] = useState<{
+    x: number; y: number; time: number; freq: number; midi: number;
+    sargam: string; western: string;
+  } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<HTMLDivElement>(null);
   const lastSeekRef = useRef(0);
@@ -65,6 +96,26 @@ export function PitchContour({
     const max = Math.ceil(Math.max(...midis) + 2);
     return { minMidi: min, maxMidi: max, tonic: tonicMidi ?? 60 };
   }, [points, tonicMidi]);
+
+  // Group transcription into phrases
+  const phrases = useMemo(() => {
+    if (!transcription || transcription.length === 0) return [];
+    const result: Phrase[] = [];
+    let current: TranscriptionNote[] = [transcription[0]];
+    let idx = 0;
+    for (let i = 1; i < transcription.length; i++) {
+      if (transcription[i].start - transcription[i - 1].end > 0.5) {
+        result.push({ startTime: current[0].start, endTime: current[current.length - 1].end, notes: current, index: idx++ });
+        current = [transcription[i]];
+      } else {
+        current.push(transcription[i]);
+      }
+    }
+    if (current.length > 0) {
+      result.push({ startTime: current[0].start, endTime: current[current.length - 1].end, notes: current, index: idx });
+    }
+    return result;
+  }, [transcription]);
 
   const totalWidth = Math.max(800, Math.ceil(duration * PX_PER_SECOND));
   const plotH = PLOT_HEIGHT - MARGIN.top - MARGIN.bottom;
@@ -166,10 +217,7 @@ export function PitchContour({
     }
   }, [isPlaying, xScale, currentTimeRef]);
 
-  // Listen for external seeks (e.g., from karaoke click)
-  useEffect(() => {
-    handleSeekSnap();
-  }, [handleSeekSnap]);
+  useEffect(() => { handleSeekSnap(); }, [handleSeekSnap]);
 
   function handleClick(e: React.MouseEvent<SVGSVGElement>) {
     if (!onSeek) return;
@@ -179,14 +227,44 @@ export function PitchContour({
     const time = (x / totalWidth) * duration;
     lastSeekRef.current = Date.now();
     onSeek(Math.max(0, Math.min(duration, time)));
-
-    // Immediately snap scroll
     setTimeout(() => {
       if (scrollRef.current) {
         const viewWidth = scrollRef.current.clientWidth;
         scrollRef.current.scrollLeft = Math.max(0, x - viewWidth / 2);
       }
     }, 0);
+  }
+
+  function handleMouseMove(e: React.MouseEvent<SVGSVGElement>) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const scrollLeft = scrollRef.current?.scrollLeft ?? 0;
+    const mx = e.clientX - rect.left + scrollLeft;
+    const my = e.clientY - rect.top;
+    const time = (mx / totalWidth) * duration;
+
+    // Find nearest pitch point by time (binary search)
+    let lo = 0, hi = points.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (points[mid].time < time) lo = mid + 1;
+      else hi = mid;
+    }
+    const nearest = points[lo];
+    if (!nearest || Math.abs(nearest.time - time) > 0.5) {
+      setHoverInfo(null);
+      return;
+    }
+
+    const midi = freqToMidi(nearest.frequency);
+    setHoverInfo({
+      x: e.clientX - rect.left + 15,
+      y: Math.min(my, PLOT_HEIGHT - 80),
+      time: nearest.time,
+      freq: nearest.frequency,
+      midi,
+      sargam: midiToNote(midi, tonic),
+      western: midiToWestern(midi),
+    });
   }
 
   if (loading) {
@@ -206,9 +284,9 @@ export function PitchContour({
   }
 
   return (
-    <div className="bg-bg-card border border-border rounded-xl overflow-hidden flex" style={{ height: PLOT_HEIGHT }}>
+    <div className="bg-bg-card border border-border rounded-xl overflow-hidden flex relative" style={{ height: PLOT_HEIGHT }}>
       {/* Sticky sargam labels */}
-      <div className="flex-shrink-0 bg-bg-card border-r border-border" style={{ width: LABEL_WIDTH }}>
+      <div className="flex-shrink-0 bg-bg-card border-r border-border z-10" style={{ width: LABEL_WIDTH }}>
         <svg width={LABEL_WIDTH} height={PLOT_HEIGHT}>
           {gridLines.map((line, i) => (
             <text
@@ -234,9 +312,25 @@ export function PitchContour({
           height={PLOT_HEIGHT}
           className="cursor-crosshair"
           onClick={handleClick}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={() => setHoverInfo(null)}
         >
+          {/* Plot background */}
           <rect x={0} y={MARGIN.top} width={totalWidth} height={plotH} fill="#0d0a04" />
 
+          {/* Phrase background spans */}
+          {phrases.map((phrase) => (
+            <rect
+              key={phrase.index}
+              x={xScale(phrase.startTime)}
+              y={MARGIN.top}
+              width={xScale(phrase.endTime) - xScale(phrase.startTime)}
+              height={plotH}
+              fill={phrase.index % 2 === 0 ? "rgba(191, 110, 19, 0.04)" : "rgba(212, 148, 42, 0.04)"}
+            />
+          ))}
+
+          {/* Sargam grid lines */}
           {gridLines.map((line, i) => (
             <line
               key={i}
@@ -249,6 +343,43 @@ export function PitchContour({
             />
           ))}
 
+          {/* Transcription note labels */}
+          {transcription && transcription.map((note, i) => {
+            const x = xScale(note.start);
+            const w = xScale(note.end) - x;
+            // Only render labels that are wide enough to see
+            if (w < 8) return null;
+            const y = yScale(note.pitchMidi);
+            return (
+              <g key={i}>
+                {/* Note span bar */}
+                <rect
+                  x={x}
+                  y={y - 8}
+                  width={w}
+                  height={16}
+                  fill="rgba(191, 110, 19, 0.15)"
+                  rx={2}
+                />
+                {/* Sargam label */}
+                {w > 20 && (
+                  <text
+                    x={x + w / 2}
+                    y={y + 3}
+                    textAnchor="middle"
+                    fill="#d4942a"
+                    fontSize={9}
+                    fontFamily="monospace"
+                    opacity={0.8}
+                  >
+                    {note.sargam}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+          {/* Time labels */}
           {timeLabels.map((t, i) => (
             <text
               key={i}
@@ -263,10 +394,11 @@ export function PitchContour({
             </text>
           ))}
 
+          {/* Pitch curve */}
           <path d={pathD} fill="none" stroke="#bf6e13" strokeWidth={1.5} opacity={0.9} />
         </svg>
 
-        {/* Playhead - updated at 60fps via ref */}
+        {/* Playhead */}
         <div
           ref={playheadRef}
           className="absolute top-0 pointer-events-none"
@@ -278,6 +410,25 @@ export function PitchContour({
           }}
         />
       </div>
+
+      {/* Hover tooltip */}
+      {hoverInfo && (
+        <div
+          className="absolute pointer-events-none bg-bg-elevated border border-border rounded-lg px-3 py-2 shadow-lg z-20"
+          style={{ left: hoverInfo.x + LABEL_WIDTH, top: hoverInfo.y }}
+        >
+          <div className="text-text-primary text-xs font-mono">
+            <span className="text-accent-gold font-bold">{hoverInfo.sargam}</span>
+            <span className="text-text-faint ml-2">({hoverInfo.western})</span>
+          </div>
+          <div className="text-text-faint text-[10px] font-mono mt-0.5">
+            {hoverInfo.freq.toFixed(1)} Hz / MIDI {hoverInfo.midi.toFixed(1)}
+          </div>
+          <div className="text-text-faint text-[10px] font-mono">
+            {formatTime(hoverInfo.time)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
