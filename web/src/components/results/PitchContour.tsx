@@ -330,7 +330,7 @@ export function PitchContour({
             />
           ))}
 
-          {/* Sargam grid lines */}
+          {/* Sargam grid lines (dotted) */}
           {gridLines.map((line, i) => (
             <line
               key={i}
@@ -340,6 +340,21 @@ export function PitchContour({
               y2={yScale(line.midi)}
               stroke={line.isTonic ? "#3a2a14" : "#1a1408"}
               strokeWidth={line.isTonic ? 1.5 : 0.5}
+              strokeDasharray={line.isTonic ? "none" : "4 4"}
+            />
+          ))}
+
+          {/* Vertical time grid lines (dotted) */}
+          {timeLabels.map((t, i) => (
+            <line
+              key={`vgrid-${i}`}
+              x1={xScale(t.time)}
+              y1={MARGIN.top}
+              x2={xScale(t.time)}
+              y2={MARGIN.top + plotH}
+              stroke="#1a1408"
+              strokeWidth={0.5}
+              strokeDasharray="4 4"
             />
           ))}
 
@@ -393,6 +408,22 @@ export function PitchContour({
               {t.label}
             </text>
           ))}
+
+          {/* Inflection point dots (note start/end boundaries) */}
+          {transcription && transcription.map((note, i) => {
+            const startX = xScale(note.start);
+            const startY = yScale(note.pitchMidi);
+            return (
+              <circle
+                key={`inf-${i}`}
+                cx={startX}
+                cy={startY}
+                r={2.5}
+                fill="#ef4444"
+                opacity={0.7}
+              />
+            );
+          })}
 
           {/* Pitch curve */}
           <path d={pathD} fill="none" stroke="#bf6e13" strokeWidth={1.5} opacity={0.9} />
