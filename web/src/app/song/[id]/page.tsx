@@ -10,6 +10,7 @@ import { KaraokeTranscription } from "@/components/results/KaraokeTranscription"
 import { Histogram } from "@/components/results/Histogram";
 import { TransitionMatrix } from "@/components/results/TransitionMatrix";
 import { PatternAnalysis } from "@/components/results/PatternAnalysis";
+import { CorrectionBar } from "@/components/results/CorrectionBar";
 import { useResults } from "@/hooks/useResults";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import Link from "next/link";
@@ -33,6 +34,8 @@ export default function SongResultsPage() {
       <Header />
       <main className="max-w-4xl mx-auto px-6 py-8">
         <Link href="/library" className="text-text-muted text-sm hover:text-text-primary transition-colors mb-6 block">&#8592; Library</Link>
+
+        <CorrectionBar songId={songId} currentTonic={data.detection.tonic} currentRaga={data.detection.raga} />
 
         <HeroSection data={data} />
         <RagaContext data={data} />
