@@ -1,18 +1,26 @@
 """Firestore client helpers for reading and writing song/analysis/comment data."""
 
+import os
 from datetime import datetime
 from typing import Optional
 import uuid
 
 from google.cloud import firestore
+from google.oauth2 import service_account
 
 _db: Optional[firestore.Client] = None
 
 
 def get_db() -> firestore.Client:
+    """Get or create the Firestore client using the Firebase service account."""
     global _db
     if _db is None:
-        _db = firestore.Client()
+        cred_path = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
+        if cred_path:
+            creds = service_account.Credentials.from_service_account_file(cred_path)
+            _db = firestore.Client(credentials=creds, project=creds.project_id)
+        else:
+            _db = firestore.Client()
     return _db
 
 
