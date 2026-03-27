@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   signInWithEmailAndPassword,
@@ -19,17 +19,18 @@ export default function SignIn() {
   const [isSignUp, setIsSignUp] = useState(false);
   const [error, setError] = useState("");
 
-  if (loading) {
+  useEffect(() => {
+    if (!loading && user) {
+      router.push("/library");
+    }
+  }, [user, loading, router]);
+
+  if (loading || user) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <p className="text-text-muted">Loading...</p>
       </div>
     );
-  }
-
-  if (user) {
-    router.push("/library");
-    return null;
   }
 
   async function handleEmailAuth(e: React.FormEvent) {
