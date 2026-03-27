@@ -58,6 +58,7 @@ export default function SongResultsPage() {
               tonicMidi={data.detection.tonicMidi}
               currentTime={player.currentTime}
               duration={player.duration}
+              isPlaying={player.isPlaying}
               onSeek={player.seek}
             />
           </div>

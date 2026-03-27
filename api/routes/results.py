@@ -165,20 +165,16 @@ async def get_results(
             stems[stem_name] = f"/api/results/{song_id}/audio/{stem_name}.mp3"
 
     # -- Histogram data --
-    hist_rows = _read_csv_rows(
-        f"{art_dir}/stationary_note_histogram_duration_weighted.csv"
-    )
+    # CSV format: header row is note names (C,C#,D,...,B), single data row has durations
+    PITCH_TO_SARGAM = {"C": "S", "C#": "r", "D": "R", "D#": "g", "E": "G", "F": "m", "F#": "M", "G": "P", "G#": "d", "A": "D", "A#": "n", "B": "N"}
+    NOTE_ORDER = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    hist_rows = _read_csv_rows(f"{art_dir}/stationary_note_histogram_duration_weighted.csv")
     histogram = []
-    for row in hist_rows:
-        histogram.append({
-            "pitchClass": int(row.get("pitch_class", 0)),
-            "sargam": row.get("sargam", ""),
-            "weight": float(
-                row.get("total_duration", 0)
-                or row.get("weight", 0)
-                or 0
-            ),
-        })
+    if hist_rows:
+        row = hist_rows[0]
+        for i, note in enumerate(NOTE_ORDER):
+            weight = float(row.get(note, 0))
+            histogram.append({"pitchClass": i, "sargam": PITCH_TO_SARGAM.get(note, note), "weight": weight})
 
     # -- Transition matrix --
     transition_matrix = _compute_transition_matrix(transcription)

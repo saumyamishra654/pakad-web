@@ -9,9 +9,19 @@ interface PitchPoint {
 }
 
 const SARGAM_LABELS = ["S", "r", "R", "g", "G", "m", "M", "P", "d", "D", "n", "N"];
+const PX_PER_SECOND = 50;
+const PLOT_HEIGHT = 400;
+const MARGIN = { top: 10, right: 15, bottom: 30, left: 0 };
+const LABEL_WIDTH = 45;
 
 function freqToMidi(hz: number): number {
   return 12 * Math.log2(hz / 440) + 69;
+}
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 export function PitchContour({
@@ -20,6 +30,7 @@ export function PitchContour({
   tonicMidi,
   currentTime,
   duration,
+  isPlaying,
   onSeek,
 }: {
   songId: string;
@@ -27,14 +38,16 @@ export function PitchContour({
   tonicMidi: number | null;
   currentTime: number;
   duration: number;
+  isPlaying: boolean;
   onSeek?: (time: number) => void;
 }) {
   const [points, setPoints] = useState<PitchPoint[]>([]);
   const [loading, setLoading] = useState(true);
-  const svgRef = useRef<SVGSVGElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [dimensions, setDimensions] = useState({ width: 800, height: 300 });
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const playheadRef = useRef<HTMLDivElement>(null);
+  const lastSeekRef = useRef(0);
 
+  // Fetch pitch data
   useEffect(() => {
     setLoading(true);
     fetch(`/api/results/${songId}/pitch/${stem}`)
@@ -43,17 +56,7 @@ export function PitchContour({
       .catch(() => setLoading(false));
   }, [songId, stem]);
 
-  useEffect(() => {
-    function handleResize() {
-      if (containerRef.current) {
-        setDimensions({ width: containerRef.current.clientWidth, height: 300 });
-      }
-    }
-    handleResize();
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
-
+  // Compute MIDI range
   const { minMidi, maxMidi, tonic } = useMemo(() => {
     if (points.length === 0) return { minMidi: 48, maxMidi: 84, tonic: 60 };
     const midis = points.map((p) => freqToMidi(p.frequency));
@@ -62,23 +65,28 @@ export function PitchContour({
     return { minMidi: min, maxMidi: max, tonic: tonicMidi ?? 60 };
   }, [points, tonicMidi]);
 
-  const margin = { top: 10, right: 15, bottom: 30, left: 45 };
-  const plotW = dimensions.width - margin.left - margin.right;
-  const plotH = dimensions.height - margin.top - margin.bottom;
+  // Total SVG width based on duration
+  const totalWidth = Math.max(800, Math.ceil(duration * PX_PER_SECOND));
+  const plotH = PLOT_HEIGHT - MARGIN.top - MARGIN.bottom;
 
+  // Scale functions
   const xScale = useCallback(
-    (t: number) => margin.left + (t / Math.max(duration, 1)) * plotW,
-    [duration, plotW, margin.left]
+    (t: number) => (t / Math.max(duration, 1)) * totalWidth,
+    [duration, totalWidth]
   );
   const yScale = useCallback(
-    (midi: number) => margin.top + plotH - ((midi - minMidi) / (maxMidi - minMidi)) * plotH,
-    [minMidi, maxMidi, plotH, margin.top]
+    (midi: number) => MARGIN.top + plotH - ((midi - minMidi) / (maxMidi - minMidi)) * plotH,
+    [minMidi, maxMidi, plotH]
   );
 
+  // Build SVG path (no downsampling limit since we have horizontal space now)
   const pathD = useMemo(() => {
     if (points.length === 0) return "";
-    const step = Math.max(1, Math.floor(points.length / 2000));
+    // Downsample to ~1 point per 2 pixels
+    const maxPoints = Math.ceil(totalWidth / 2);
+    const step = Math.max(1, Math.floor(points.length / maxPoints));
     const sampled = points.filter((_, i) => i % step === 0);
+
     let d = "";
     let prevMidi = 0;
     for (let i = 0; i < sampled.length; i++) {
@@ -94,8 +102,9 @@ export function PitchContour({
       prevMidi = midi;
     }
     return d;
-  }, [points, xScale, yScale]);
+  }, [points, xScale, yScale, totalWidth]);
 
+  // Grid lines
   const gridLines = useMemo(() => {
     const lines: { midi: number; label: string; isTonic: boolean }[] = [];
     for (let midi = Math.ceil(minMidi); midi <= Math.floor(maxMidi); midi++) {
@@ -108,29 +117,74 @@ export function PitchContour({
     return lines;
   }, [minMidi, maxMidi, tonic]);
 
+  // Time labels (one every ~5 seconds)
   const timeLabels = useMemo(() => {
     if (duration <= 0) return [];
-    const count = Math.min(8, Math.floor(plotW / 80));
-    const step = duration / count;
-    return Array.from({ length: count + 1 }, (_, i) => {
-      const t = i * step;
-      const m = Math.floor(t / 60);
-      const s = Math.floor(t % 60);
-      return { time: t, label: `${m}:${s.toString().padStart(2, "0")}` };
-    });
-  }, [duration, plotW]);
+    const step = Math.max(5, Math.ceil(duration / (totalWidth / 100)));
+    const labels: { time: number; label: string }[] = [];
+    for (let t = 0; t <= duration; t += step) {
+      labels.push({ time: t, label: formatTime(t) });
+    }
+    return labels;
+  }, [duration, totalWidth]);
+
+  // Auto-scroll during playback
+  useEffect(() => {
+    if (!isPlaying || !scrollRef.current) return;
+
+    let rafId: number;
+    function tick() {
+      const container = scrollRef.current;
+      if (!container) return;
+
+      const x = xScale(currentTime);
+      const viewWidth = container.clientWidth;
+      const target = Math.max(0, x - viewWidth / 2);
+
+      // Snap if we just seeked, smooth easing otherwise
+      const timeSinceSeek = Date.now() - lastSeekRef.current;
+      if (timeSinceSeek < 300 || Math.abs(container.scrollLeft - target) > viewWidth) {
+        container.scrollLeft = target;
+      } else {
+        container.scrollLeft = container.scrollLeft * 0.85 + target * 0.15;
+      }
+
+      rafId = requestAnimationFrame(tick);
+    }
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying, currentTime, xScale]);
+
+  // Update playhead position via ref (avoids re-render on every frame)
+  useEffect(() => {
+    if (playheadRef.current) {
+      playheadRef.current.style.left = `${xScale(currentTime)}px`;
+    }
+  }, [currentTime, xScale]);
+
+  // Snap scroll when seeking while paused
+  useEffect(() => {
+    if (!isPlaying && scrollRef.current) {
+      const x = xScale(currentTime);
+      const viewWidth = scrollRef.current.clientWidth;
+      scrollRef.current.scrollLeft = Math.max(0, x - viewWidth / 2);
+    }
+  }, [currentTime, isPlaying, xScale]);
 
   function handleClick(e: React.MouseEvent<SVGSVGElement>) {
-    if (!svgRef.current || !onSeek) return;
-    const rect = svgRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left - margin.left;
-    const ratio = Math.max(0, Math.min(1, x / plotW));
-    onSeek(ratio * duration);
+    if (!onSeek) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const scrollLeft = scrollRef.current?.scrollLeft ?? 0;
+    const x = e.clientX - rect.left + scrollLeft;
+    const time = (x / totalWidth) * duration;
+    lastSeekRef.current = Date.now();
+    onSeek(Math.max(0, Math.min(duration, time)));
   }
 
   if (loading) {
     return (
-      <div className="bg-bg-card border border-border rounded-xl h-[300px] flex items-center justify-center">
+      <div className="bg-bg-card border border-border rounded-xl flex items-center justify-center" style={{ height: PLOT_HEIGHT }}>
         <p className="text-text-muted text-sm">Loading pitch data...</p>
       </div>
     );
@@ -138,42 +192,90 @@ export function PitchContour({
 
   if (points.length === 0) {
     return (
-      <div className="bg-bg-card border border-border rounded-xl h-[300px] flex items-center justify-center">
+      <div className="bg-bg-card border border-border rounded-xl flex items-center justify-center" style={{ height: PLOT_HEIGHT }}>
         <p className="text-text-muted text-sm">No pitch data available</p>
       </div>
     );
   }
 
-  const playheadX = xScale(currentTime);
-
   return (
-    <div ref={containerRef} className="bg-bg-card border border-border rounded-xl overflow-hidden">
-      <svg ref={svgRef} width={dimensions.width} height={dimensions.height} className="cursor-crosshair" onClick={handleClick}>
-        <rect x={margin.left} y={margin.top} width={plotW} height={plotH} fill="#0d0a04" />
-
-        {gridLines.map((line, i) => (
-          <g key={i}>
-            <line x1={margin.left} y1={yScale(line.midi)} x2={margin.left + plotW} y2={yScale(line.midi)}
-              stroke={line.isTonic ? "#3a2a14" : "#1a1408"} strokeWidth={line.isTonic ? 1.5 : 0.5} />
-            <text x={margin.left - 6} y={yScale(line.midi) + 3} textAnchor="end"
-              fill={line.isTonic ? "#d4942a" : "#5a4a30"} fontSize={10} fontFamily="monospace">
+    <div className="bg-bg-card border border-border rounded-xl overflow-hidden flex" style={{ height: PLOT_HEIGHT }}>
+      {/* Sticky sargam labels */}
+      <div className="flex-shrink-0 bg-bg-card border-r border-border" style={{ width: LABEL_WIDTH }}>
+        <svg width={LABEL_WIDTH} height={PLOT_HEIGHT}>
+          {gridLines.map((line, i) => (
+            <text
+              key={i}
+              x={LABEL_WIDTH - 6}
+              y={yScale(line.midi) + 3}
+              textAnchor="end"
+              fill={line.isTonic ? "#d4942a" : "#5a4a30"}
+              fontSize={10}
+              fontFamily="monospace"
+              fontWeight={line.isTonic ? "bold" : "normal"}
+            >
               {line.label}
             </text>
-          </g>
-        ))}
+          ))}
+        </svg>
+      </div>
 
-        {timeLabels.map((t, i) => (
-          <text key={i} x={xScale(t.time)} y={dimensions.height - 8} textAnchor="middle"
-            fill="#5a4a30" fontSize={10} fontFamily="monospace">
-            {t.label}
-          </text>
-        ))}
+      {/* Scrollable plot area */}
+      <div ref={scrollRef} className="flex-1 overflow-x-auto relative" style={{ height: PLOT_HEIGHT }}>
+        <svg
+          width={totalWidth}
+          height={PLOT_HEIGHT}
+          className="cursor-crosshair"
+          onClick={handleClick}
+        >
+          {/* Plot background */}
+          <rect x={0} y={MARGIN.top} width={totalWidth} height={plotH} fill="#0d0a04" />
 
-        <path d={pathD} fill="none" stroke="#bf6e13" strokeWidth={1.5} opacity={0.9} />
+          {/* Sargam grid lines */}
+          {gridLines.map((line, i) => (
+            <line
+              key={i}
+              x1={0}
+              y1={yScale(line.midi)}
+              x2={totalWidth}
+              y2={yScale(line.midi)}
+              stroke={line.isTonic ? "#3a2a14" : "#1a1408"}
+              strokeWidth={line.isTonic ? 1.5 : 0.5}
+            />
+          ))}
 
-        <line x1={playheadX} y1={margin.top} x2={playheadX} y2={margin.top + plotH}
-          stroke="#bf6e13" strokeWidth={2} opacity={0.8} />
-      </svg>
+          {/* Time labels */}
+          {timeLabels.map((t, i) => (
+            <text
+              key={i}
+              x={xScale(t.time)}
+              y={PLOT_HEIGHT - 8}
+              textAnchor="middle"
+              fill="#5a4a30"
+              fontSize={10}
+              fontFamily="monospace"
+            >
+              {t.label}
+            </text>
+          ))}
+
+          {/* Pitch curve */}
+          <path d={pathD} fill="none" stroke="#bf6e13" strokeWidth={1.5} opacity={0.9} />
+        </svg>
+
+        {/* Playhead (positioned via ref for performance) */}
+        <div
+          ref={playheadRef}
+          className="absolute top-0 pointer-events-none"
+          style={{
+            left: xScale(currentTime),
+            width: 2,
+            height: PLOT_HEIGHT - MARGIN.bottom,
+            backgroundColor: "#bf6e13",
+            opacity: 0.8,
+          }}
+        />
+      </div>
     </div>
   );
 }
