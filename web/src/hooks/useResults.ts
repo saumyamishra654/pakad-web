@@ -12,6 +12,8 @@ export interface ResultsData {
   stems: Record<string, string>;
   histogram: { pitchClass: number; sargam: string; weight: number }[];
   transitionMatrix: { notes: string[]; matrix: number[][] };
+  correctionSummary: Record<string, number>;
+  patternAnalysis: Record<string, unknown>;
 }
 
 export function useResults(songId: string) {

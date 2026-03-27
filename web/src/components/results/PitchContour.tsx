@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback, type RefObject } from "react";
 
 interface PitchPoint {
   time: number;
@@ -28,7 +28,7 @@ export function PitchContour({
   songId,
   stem = "vocals",
   tonicMidi,
-  currentTime,
+  currentTimeRef,
   duration,
   isPlaying,
   onSeek,
@@ -36,7 +36,7 @@ export function PitchContour({
   songId: string;
   stem?: string;
   tonicMidi: number | null;
-  currentTime: number;
+  currentTimeRef: RefObject<number>;
   duration: number;
   isPlaying: boolean;
   onSeek?: (time: number) => void;
@@ -46,6 +46,7 @@ export function PitchContour({
   const scrollRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<HTMLDivElement>(null);
   const lastSeekRef = useRef(0);
+  const rafRef = useRef(0);
 
   // Fetch pitch data
   useEffect(() => {
@@ -65,11 +66,9 @@ export function PitchContour({
     return { minMidi: min, maxMidi: max, tonic: tonicMidi ?? 60 };
   }, [points, tonicMidi]);
 
-  // Total SVG width based on duration
   const totalWidth = Math.max(800, Math.ceil(duration * PX_PER_SECOND));
   const plotH = PLOT_HEIGHT - MARGIN.top - MARGIN.bottom;
 
-  // Scale functions
   const xScale = useCallback(
     (t: number) => (t / Math.max(duration, 1)) * totalWidth,
     [duration, totalWidth]
@@ -79,10 +78,9 @@ export function PitchContour({
     [minMidi, maxMidi, plotH]
   );
 
-  // Build SVG path (no downsampling limit since we have horizontal space now)
+  // Build SVG path
   const pathD = useMemo(() => {
     if (points.length === 0) return "";
-    // Downsample to ~1 point per 2 pixels
     const maxPoints = Math.ceil(totalWidth / 2);
     const step = Math.max(1, Math.floor(points.length / maxPoints));
     const sampled = points.filter((_, i) => i % step === 0);
@@ -117,7 +115,7 @@ export function PitchContour({
     return lines;
   }, [minMidi, maxMidi, tonic]);
 
-  // Time labels (one every ~5 seconds)
+  // Time labels
   const timeLabels = useMemo(() => {
     if (duration <= 0) return [];
     const step = Math.max(5, Math.ceil(duration / (totalWidth / 100)));
@@ -128,49 +126,50 @@ export function PitchContour({
     return labels;
   }, [duration, totalWidth]);
 
-  // Auto-scroll during playback
+  // 60fps RAF loop for playhead + auto-scroll
   useEffect(() => {
-    if (!isPlaying || !scrollRef.current) return;
-
-    let rafId: number;
     function tick() {
       const container = scrollRef.current;
-      if (!container) return;
+      const playhead = playheadRef.current;
+      const time = currentTimeRef.current ?? 0;
 
-      const x = xScale(currentTime);
-      const viewWidth = container.clientWidth;
-      const target = Math.max(0, x - viewWidth / 2);
-
-      // Snap if we just seeked, smooth easing otherwise
-      const timeSinceSeek = Date.now() - lastSeekRef.current;
-      if (timeSinceSeek < 300 || Math.abs(container.scrollLeft - target) > viewWidth) {
-        container.scrollLeft = target;
-      } else {
-        container.scrollLeft = container.scrollLeft * 0.85 + target * 0.15;
+      if (playhead) {
+        playhead.style.left = `${xScale(time)}px`;
       }
 
-      rafId = requestAnimationFrame(tick);
+      if (container && isPlaying) {
+        const x = xScale(time);
+        const viewWidth = container.clientWidth;
+        const target = Math.max(0, x - viewWidth / 2);
+
+        const timeSinceSeek = Date.now() - lastSeekRef.current;
+        if (timeSinceSeek < 300 || Math.abs(container.scrollLeft - target) > viewWidth) {
+          container.scrollLeft = target;
+        } else {
+          container.scrollLeft = container.scrollLeft * 0.92 + target * 0.08;
+        }
+      }
+
+      rafRef.current = requestAnimationFrame(tick);
     }
 
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, [isPlaying, currentTime, xScale]);
-
-  // Update playhead position via ref (avoids re-render on every frame)
-  useEffect(() => {
-    if (playheadRef.current) {
-      playheadRef.current.style.left = `${xScale(currentTime)}px`;
-    }
-  }, [currentTime, xScale]);
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [isPlaying, xScale, currentTimeRef]);
 
   // Snap scroll when seeking while paused
-  useEffect(() => {
+  const handleSeekSnap = useCallback(() => {
     if (!isPlaying && scrollRef.current) {
-      const x = xScale(currentTime);
+      const x = xScale(currentTimeRef.current ?? 0);
       const viewWidth = scrollRef.current.clientWidth;
       scrollRef.current.scrollLeft = Math.max(0, x - viewWidth / 2);
     }
-  }, [currentTime, isPlaying, xScale]);
+  }, [isPlaying, xScale, currentTimeRef]);
+
+  // Listen for external seeks (e.g., from karaoke click)
+  useEffect(() => {
+    handleSeekSnap();
+  }, [handleSeekSnap]);
 
   function handleClick(e: React.MouseEvent<SVGSVGElement>) {
     if (!onSeek) return;
@@ -180,6 +179,14 @@ export function PitchContour({
     const time = (x / totalWidth) * duration;
     lastSeekRef.current = Date.now();
     onSeek(Math.max(0, Math.min(duration, time)));
+
+    // Immediately snap scroll
+    setTimeout(() => {
+      if (scrollRef.current) {
+        const viewWidth = scrollRef.current.clientWidth;
+        scrollRef.current.scrollLeft = Math.max(0, x - viewWidth / 2);
+      }
+    }, 0);
   }
 
   if (loading) {
@@ -228,10 +235,8 @@ export function PitchContour({
           className="cursor-crosshair"
           onClick={handleClick}
         >
-          {/* Plot background */}
           <rect x={0} y={MARGIN.top} width={totalWidth} height={plotH} fill="#0d0a04" />
 
-          {/* Sargam grid lines */}
           {gridLines.map((line, i) => (
             <line
               key={i}
@@ -244,7 +249,6 @@ export function PitchContour({
             />
           ))}
 
-          {/* Time labels */}
           {timeLabels.map((t, i) => (
             <text
               key={i}
@@ -259,16 +263,14 @@ export function PitchContour({
             </text>
           ))}
 
-          {/* Pitch curve */}
           <path d={pathD} fill="none" stroke="#bf6e13" strokeWidth={1.5} opacity={0.9} />
         </svg>
 
-        {/* Playhead (positioned via ref for performance) */}
+        {/* Playhead - updated at 60fps via ref */}
         <div
           ref={playheadRef}
           className="absolute top-0 pointer-events-none"
           style={{
-            left: xScale(currentTime),
             width: 2,
             height: PLOT_HEIGHT - MARGIN.bottom,
             backgroundColor: "#bf6e13",

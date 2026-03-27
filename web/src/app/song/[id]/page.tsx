@@ -9,6 +9,7 @@ import { PitchContour } from "@/components/results/PitchContour";
 import { KaraokeTranscription } from "@/components/results/KaraokeTranscription";
 import { Histogram } from "@/components/results/Histogram";
 import { TransitionMatrix } from "@/components/results/TransitionMatrix";
+import { PatternAnalysis } from "@/components/results/PatternAnalysis";
 import { useResults } from "@/hooks/useResults";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import Link from "next/link";
@@ -56,7 +57,7 @@ export default function SongResultsPage() {
               songId={songId}
               stem={player.activeStem}
               tonicMidi={data.detection.tonicMidi}
-              currentTime={player.currentTime}
+              currentTimeRef={player.currentTimeRef}
               duration={player.duration}
               isPlaying={player.isPlaying}
               onSeek={player.seek}
@@ -70,6 +71,14 @@ export default function SongResultsPage() {
             notes={data.transcription}
             currentTime={player.currentTime}
             onSeek={player.seek}
+          />
+        )}
+
+        {/* Pattern analysis */}
+        {(data.correctionSummary || data.patternAnalysis) && (
+          <PatternAnalysis
+            correctionSummary={data.correctionSummary || {}}
+            patternAnalysis={data.patternAnalysis || {}}
           />
         )}
 

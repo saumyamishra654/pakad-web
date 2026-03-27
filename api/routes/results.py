@@ -179,6 +179,11 @@ async def get_results(
     # -- Transition matrix --
     transition_matrix = _compute_transition_matrix(transcription)
 
+    # -- Analysis stats (correction summary, pattern analysis) from meta JSON --
+    analysis_stats = analysis_meta.get("stats", {})
+    correction_summary = analysis_stats.get("correction_summary", {})
+    pattern_analysis = analysis_stats.get("pattern_analysis", {})
+
     return {
         "song": {
             "id": song.get("id"),
@@ -200,6 +205,8 @@ async def get_results(
         "stems": stems,
         "histogram": histogram,
         "transitionMatrix": transition_matrix,
+        "correctionSummary": correction_summary,
+        "patternAnalysis": pattern_analysis,
     }
 
 
