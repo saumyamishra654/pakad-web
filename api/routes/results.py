@@ -50,6 +50,63 @@ def _find_artifact_dir(audio_hash: str) -> Optional[str]:
     return base
 
 
+def _compute_pitch_histogram(pitch_csv_path: str, num_bins: int = 25, min_confidence: float = 0.5) -> list[dict]:
+    """Compute a pitch class histogram from raw pitch data CSV.
+
+    Returns a list of {cents, label, weight} dicts. 25 bins across 1200 cents (one octave).
+    Labels use western notation (C, C#, D, etc.).
+    """
+    import math
+    NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+    if not Path(pitch_csv_path).exists():
+        return []
+
+    rows = _read_csv_rows(pitch_csv_path, max_rows=100000)
+    if not rows:
+        return []
+
+    # Compute cents (0-1200) from Hz for each voiced frame
+    cent_values = []
+    for row in rows:
+        hz = float(row.get("pitch_hz", 0))
+        conf = float(row.get("confidence", 0))
+        if hz > 0 and conf >= min_confidence:
+            midi = 12 * math.log2(hz / 440) + 69
+            cents = (midi % 12) * 100.0  # 0-1200 range
+            cent_values.append(cents)
+
+    if not cent_values:
+        return []
+
+    # Build histogram
+    bin_width = 1200.0 / num_bins
+    bins = [0.0] * num_bins
+    for c in cent_values:
+        idx = min(int(c / bin_width), num_bins - 1)
+        bins[idx] += 1
+
+    # Normalize to relative weight
+    total = sum(bins)
+    if total > 0:
+        bins = [b / total for b in bins]
+
+    # Build result with western note labels
+    result = []
+    for i in range(num_bins):
+        center_cents = (i + 0.5) * bin_width
+        # Map center_cents to nearest western note
+        note_idx = int(round(center_cents / 100)) % 12
+        label = NOTE_NAMES[note_idx]
+        # Add cents offset if not near a note center
+        offset = center_cents - (note_idx * 100)
+        if abs(offset) > 20:
+            label = f"{label}{'+' if offset > 0 else ''}{int(offset)}c"
+        result.append({"cents": center_cents, "label": label, "weight": bins[i]})
+
+    return result
+
+
 def _get_raga_info(raga_name: str) -> dict:
     """Look up aroha/avroh for a raga from the CSV database."""
     if not raga_name:
@@ -164,17 +221,11 @@ async def get_results(
         if Path(f"{art_dir}/{stem_name}.mp3").exists():
             stems[stem_name] = f"/api/results/{song_id}/audio/{stem_name}.mp3"
 
-    # -- Histogram data --
-    # CSV format: header row is note names (C,C#,D,...,B), single data row has durations
-    PITCH_TO_SARGAM = {"C": "S", "C#": "r", "D": "R", "D#": "g", "E": "G", "F": "m", "F#": "M", "G": "P", "G#": "d", "A": "D", "A#": "n", "B": "N"}
-    NOTE_ORDER = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-    hist_rows = _read_csv_rows(f"{art_dir}/stationary_note_histogram_duration_weighted.csv")
-    histogram = []
-    if hist_rows:
-        row = hist_rows[0]
-        for i, note in enumerate(NOTE_ORDER):
-            weight = float(row.get(note, 0))
-            histogram.append({"pitchClass": i, "sargam": PITCH_TO_SARGAM.get(note, note), "weight": weight})
+    # -- Pitch histograms (25-bin, from raw pitch data) --
+    vocals_histogram = _compute_pitch_histogram(f"{art_dir}/vocals_pitch_data.csv")
+    accompaniment_histogram = _compute_pitch_histogram(f"{art_dir}/accompaniment_pitch_data.csv")
+    # Keep the old 12-bin for backward compat
+    histogram = vocals_histogram
 
     # -- Transition matrix --
     transition_matrix = _compute_transition_matrix(transcription)
@@ -204,6 +255,8 @@ async def get_results(
         "images": images,
         "stems": stems,
         "histogram": histogram,
+        "vocalsHistogram": vocals_histogram,
+        "accompanimentHistogram": accompaniment_histogram,
         "transitionMatrix": transition_matrix,
         "correctionSummary": correction_summary,
         "patternAnalysis": pattern_analysis,

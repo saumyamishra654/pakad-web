@@ -11,6 +11,8 @@ export interface ResultsData {
   images: Record<string, string>;
   stems: Record<string, string>;
   histogram: { pitchClass: number; sargam: string; weight: number }[];
+  vocalsHistogram: { cents: number; label: string; weight: number }[];
+  accompanimentHistogram: { cents: number; label: string; weight: number }[];
   transitionMatrix: { notes: string[]; matrix: number[][] };
   correctionSummary: Record<string, number>;
   patternAnalysis: Record<string, unknown>;

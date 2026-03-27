@@ -111,20 +111,21 @@ export default function SongResultsPage() {
           </div>
         )}
 
-        {/* Deep Analysis: histogram + transition matrix */}
-        {(data.histogram?.length > 0 || data.transitionMatrix?.notes?.length > 0) && (
-          <div className="mb-8">
-            <h2 className="text-base font-semibold text-text-primary mb-3">Deep Analysis</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {data.histogram && data.histogram.length > 0 && (
-                <Histogram data={data.histogram} title="Note Duration Histogram" />
-              )}
-              {data.transitionMatrix && data.transitionMatrix.notes.length > 0 && (
-                <TransitionMatrix data={data.transitionMatrix} />
-              )}
-            </div>
+        {/* Deep Analysis: histograms + transition matrix */}
+        <div className="mb-8">
+          <h2 className="text-base font-semibold text-text-primary mb-3">Deep Analysis</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {data.vocalsHistogram && data.vocalsHistogram.length > 0 && (
+              <Histogram data={data.vocalsHistogram} title="Vocal Pitch Distribution" />
+            )}
+            {data.accompanimentHistogram && data.accompanimentHistogram.length > 0 && (
+              <Histogram data={data.accompanimentHistogram} title="Accompaniment Pitch Distribution" />
+            )}
+            {data.transitionMatrix && data.transitionMatrix.notes.length > 0 && (
+              <TransitionMatrix data={data.transitionMatrix} />
+            )}
           </div>
-        )}
+        </div>
       </main>
     </>
   );
