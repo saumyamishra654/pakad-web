@@ -242,6 +242,8 @@ async def get_results(
             "source": song.get("source"),
             "youtubeVideoId": song.get("youtubeVideoId"),
             "createdAt": str(song.get("createdAt", "")),
+            "uploadedBy": song.get("uploadedBy"),
+            "visibility": song.get("visibility", "private"),
         },
         "detection": {
             "raga": detected.get("top_raga"),

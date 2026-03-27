@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 
 export interface ResultsData {
-  song: { id: string; title: string; source: string; youtubeVideoId: string | null; createdAt: string };
+  song: { id: string; title: string; source: string; youtubeVideoId: string | null; createdAt: string; uploadedBy: string; visibility: string };
   detection: { raga: string | null; tonic: string | null; tonicMidi: number | null; confidence: number | null };
   ragaInfo: { name?: string; aroha?: string; avroh?: string };
   candidates: { raga: string; tonic: string; score: number; rank: number }[];

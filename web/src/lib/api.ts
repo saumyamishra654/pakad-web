@@ -86,6 +86,11 @@ export async function listRagas() {
   return res.json();
 }
 
+export async function toggleVisibility(songId: string) {
+  const res = await apiFetch(`/api/songs/${songId}/visibility`, { method: "PATCH" });
+  return res.json();
+}
+
 export async function listPublicSongs(params?: { orderBy?: string; songType?: string; limit?: number }) {
   const query = new URLSearchParams();
   if (params?.orderBy) query.set("order_by", params.orderBy);

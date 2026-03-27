@@ -15,6 +15,8 @@ import { CommentSection } from "@/components/comments/CommentSection";
 import { useResults } from "@/hooks/useResults";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { useAuthContext } from "@/components/layout/AuthProvider";
+import { VisibilityToggle } from "@/components/results/VisibilityToggle";
+import { ForkButton } from "@/components/results/ForkButton";
 import Link from "next/link";
 
 export default function SongResultsPage() {
@@ -41,6 +43,16 @@ export default function SongResultsPage() {
         <CorrectionBar songId={songId} currentTonic={data.detection.tonic} currentRaga={data.detection.raga} />
 
         <HeroSection data={data} />
+
+        {/* Visibility toggle (owner only) + Fork button (non-owner on public songs) */}
+        <div className="flex items-center justify-center gap-3 -mt-4 mb-6">
+          {user && user.uid === data.song.uploadedBy && (
+            <VisibilityToggle songId={songId} initialVisibility={data.song.visibility} />
+          )}
+          {user && user.uid !== data.song.uploadedBy && data.song.visibility === "public" && (
+            <ForkButton songId={songId} />
+          )}
+        </div>
         <RagaContext data={data} />
 
         {/* YouTube embed */}

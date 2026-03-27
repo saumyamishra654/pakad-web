@@ -22,6 +22,19 @@ async def get_song(song_id: str, user: Optional[dict] = Depends(get_optional_use
             raise HTTPException(status_code=403, detail="Access denied")
     return song
 
+@router.patch("/{song_id}/visibility")
+async def update_visibility(song_id: str, user: dict = Depends(get_current_user)):
+    """Toggle song visibility between public and private. Owner only."""
+    from api.firestore_client import get_song as fs_get_song, update_song as fs_update_song
+    song = fs_get_song(song_id)
+    if not song:
+        raise HTTPException(status_code=404, detail="Song not found")
+    if song["uploadedBy"] != user["uid"]:
+        raise HTTPException(status_code=403, detail="Only the owner can change visibility")
+    new_visibility = "private" if song["visibility"] == "public" else "public"
+    fs_update_song(song_id, visibility=new_visibility)
+    return {"visibility": new_visibility}
+
 @router.delete("/{song_id}")
 async def delete_song(song_id: str, user: dict = Depends(get_current_user)):
     """Delete a song and its Firestore data. Only the owner can delete."""
