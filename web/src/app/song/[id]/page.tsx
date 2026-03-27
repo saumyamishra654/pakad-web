@@ -11,8 +11,10 @@ import { Histogram } from "@/components/results/Histogram";
 import { TransitionMatrix } from "@/components/results/TransitionMatrix";
 import { PatternAnalysis } from "@/components/results/PatternAnalysis";
 import { CorrectionBar } from "@/components/results/CorrectionBar";
+import { CommentSection } from "@/components/comments/CommentSection";
 import { useResults } from "@/hooks/useResults";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
+import { useAuthContext } from "@/components/layout/AuthProvider";
 import Link from "next/link";
 
 export default function SongResultsPage() {
@@ -20,6 +22,7 @@ export default function SongResultsPage() {
   const songId = params.id as string;
   const { data, loading, error } = useResults(songId);
   const player = useAudioPlayer();
+  const { user } = useAuthContext();
 
   if (loading) {
     return (<><Header /><div className="flex items-center justify-center min-h-[60vh]"><p className="text-text-muted">Loading analysis...</p></div></>);
@@ -130,6 +133,14 @@ export default function SongResultsPage() {
             )}
           </div>
         </div>
+
+        {/* Timestamped comments */}
+        <CommentSection
+          songId={songId}
+          currentTime={player.currentTime}
+          onSeek={player.seek}
+          isAuthenticated={!!user}
+        />
       </main>
     </>
   );
