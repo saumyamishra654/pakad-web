@@ -1,7 +1,12 @@
 import type { NextConfig } from "next";
 
+const isDev = process.env.NODE_ENV === "development";
+
 const nextConfig: NextConfig = {
+  output: "standalone",
   async rewrites() {
+    // Only proxy in dev. In production, nginx routes /api/* to FastAPI.
+    if (!isDev) return [];
     return [
       {
         source: "/api/:path*",
