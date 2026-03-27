@@ -53,7 +53,11 @@ async def upload_file(
         song_id=song_id, analysis_type="canonical", owner_id=user["uid"],
         params={"tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender},
     )
-    return {"songId": song_id, "analysisId": analysis_id, "status": "processing"}
+    from api.jobs import submit_job
+    job_id = submit_job(song_id, analysis_id, user["uid"], {
+        "tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender,
+    })
+    return {"songId": song_id, "analysisId": analysis_id, "jobId": job_id, "status": "processing"}
 
 @router.post("/upload-youtube")
 async def upload_youtube(
@@ -75,7 +79,11 @@ async def upload_youtube(
             song_id=existing["id"], analysis_type="fork", owner_id=user["uid"],
             params={"tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender},
         )
-        return {"songId": existing["id"], "analysisId": analysis_id, "status": "processing", "reusedExisting": True}
+        from api.jobs import submit_job
+        job_id = submit_job(existing["id"], analysis_id, user["uid"], {
+            "tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender,
+        })
+        return {"songId": existing["id"], "analysisId": analysis_id, "jobId": job_id, "status": "processing", "reusedExisting": True}
     audio_hash = f"yt_{video_id}"
     song_id = firestore_client.create_song(
         title=title, source="youtube", uploaded_by=user["uid"],
@@ -86,4 +94,8 @@ async def upload_youtube(
         song_id=song_id, analysis_type="canonical", owner_id=user["uid"],
         params={"tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender},
     )
-    return {"songId": song_id, "analysisId": analysis_id, "status": "processing"}
+    from api.jobs import submit_job
+    job_id = submit_job(song_id, analysis_id, user["uid"], {
+        "tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender,
+    })
+    return {"songId": song_id, "analysisId": analysis_id, "jobId": job_id, "status": "processing"}

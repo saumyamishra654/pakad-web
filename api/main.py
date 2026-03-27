@@ -1,7 +1,7 @@
 """Multi-user FastAPI backend for the Raga Detection web app."""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from api.routes import songs, analysis, artifacts
+from api.routes import songs, analysis, artifacts, jobs
 
 app = FastAPI(title="Raga Detection API", version="1.0.0", description="Multi-user raga detection and analysis API")
 
@@ -16,6 +16,7 @@ app.add_middleware(
 app.include_router(songs.router)
 app.include_router(analysis.router)
 app.include_router(artifacts.router)
+app.include_router(jobs.router)
 
 @app.get("/api/health")
 async def health():
