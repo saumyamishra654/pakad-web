@@ -1,0 +1,620 @@
+"""
+Transcription Module
+===================
+
+This module implements "Stationary Point Transcription" logic.
+It identifies musical notes by finding regions where the pitch contour is stable
+(derivative approx 0). This is designed to capture sustained notes more naturally
+than simple quantization.
+
+Key Concepts:
+- Pre-smoothing: Smoothing the pitch curve before differentiation to handle vibrato.
+- Stable Regions: Continuous segments where |dp/dt| < threshold.
+- Snapping: Aligning partial stable pitches to the nearest semitone or raga note.
+- Inflection Points: Points where derivative changes sign (peaks/valleys).
+"""
+
+from dataclasses import dataclass
+from typing import Dict, List, Literal, Optional, Tuple, Union
+import math
+import re
+import numpy as np
+from scipy import ndimage
+
+from .sequence import Note, tonic_to_midi_class
+
+@dataclass
+class TranscriptionEvent:
+    """A transcribed musical event (note)."""
+    start: float
+    end: float
+    pitch_midi: float      # The actual median pitch of the stable region
+    snapped_midi: float    # The quantized pitch (chromatic or raga-aligned)
+    sargam: str = ""       # Sargam label relative to tonic
+    error_cents: float = 0.0 # Deviation from the snapped target
+    is_stable: bool = True # False if this is a transient/glide region (future use)
+    energy: float = 0.0    # Mean energy of the event
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+
+_NOTE_RE = re.compile(
+    r"^\s*([A-Ga-g])([#b♯♭]?)(-?\d+)?\s*$"
+)
+_NOTE_BASE_PC = {
+    "C": 0,
+    "D": 2,
+    "E": 4,
+    "F": 5,
+    "G": 7,
+    "A": 9,
+    "B": 11,
+}
+
+
+def _hz_to_midi_scalar(freq_hz: float) -> float:
+    if not np.isfinite(freq_hz) or freq_hz <= 0.0:
+        return float("nan")
+    return float(69.0 + 12.0 * math.log2(float(freq_hz) / 440.0))
+
+
+def _hz_to_midi_array(freq_hz: np.ndarray) -> np.ndarray:
+    freqs = np.asarray(freq_hz, dtype=float)
+    out = np.full_like(freqs, np.nan, dtype=float)
+    valid = np.isfinite(freqs) & (freqs > 0.0)
+    if np.any(valid):
+        out[valid] = 69.0 + 12.0 * np.log2(freqs[valid] / 440.0)
+    return out
+
+
+def _midi_to_hz_scalar(midi_val: float) -> float:
+    if not np.isfinite(midi_val):
+        return float("nan")
+    return float(440.0 * (2.0 ** ((float(midi_val) - 69.0) / 12.0)))
+
+
+def _parse_note_to_midi(note: str) -> Optional[float]:
+    match = _NOTE_RE.match(str(note))
+    if not match:
+        return None
+
+    name = match.group(1).upper()
+    accidental = match.group(2)
+    octave_txt = match.group(3)
+
+    base = _NOTE_BASE_PC.get(name)
+    if base is None:
+        return None
+
+    if accidental in {"#", "♯"}:
+        base += 1
+    elif accidental in {"b", "♭"}:
+        base -= 1
+    pitch_class = base % 12
+
+    if octave_txt is None:
+        return float(60 + pitch_class)
+
+    octave = int(octave_txt)
+    midi = (octave + 1) * 12 + pitch_class
+    return float(midi)
+
+
+def detect_stationary_events(
+    pitch_hz: np.ndarray,
+    timestamps: np.ndarray,
+    voicing_mask: np.ndarray,
+    tonic: Union[int, str, float],
+    # Energy parameters
+    energy: Optional[np.ndarray] = None,
+    energy_threshold: float = 0.0,
+    # Configurable parameters
+    smoothing_sigma_ms: float = 70.0,  # 70ms smoothing for vibrato filtering
+    frame_period_s: float = 0.01,      # 10ms frame period
+    derivative_threshold: float = 1.6, # Semitones/sec threshold for stability
+    min_event_duration: float = 0.1,   # Minimum note length
+    snap_mode: Literal["chromatic", "raga"] = "chromatic",
+    allowed_raga_notes: Optional[List[int]] = None,
+    snap_tolerance_cents: float = 35.0,
+    bias_cents: float = 0.0,
+    derivative_profile_out: Optional[Dict[str, np.ndarray]] = None,
+) -> List[TranscriptionEvent]:
+    """
+    Main entry point for stationary point transcription.
+    
+    Args:
+        pitch_hz: Array of pitch frequencies in Hz.
+        timestamps: Array of timestamps in seconds.
+        voicing_mask: Boolean mask of voiced frames.
+        tonic: Tonic pitch (Hz, MIDI, or note name).
+        smoothing_sigma_ms: Gaussian kernel sigma in milliseconds.
+        frame_period_s: Time between frames in seconds.
+        derivative_threshold: Max pitch change (semitones/sec) to consider stable.
+        min_event_duration: Minimum seconds for a region to be a note.
+        snap_mode: 'chromatic' (12-tone) or 'raga' (restricted set).
+        allowed_raga_notes: List of allowed pitch classes (0-11) if snap_mode='raga'.
+        snap_tolerance_cents: Max deviation to allow snapping (legacy).
+        
+    Returns:
+        List of TranscriptionEvent objects.
+    """
+    if len(pitch_hz) == 0 or not np.any(voicing_mask):
+        return []
+
+    # 0. Apply Energy Filter (if provided)
+    # If energy is below threshold, treat as unvoiced.
+    # This effectively filters phantom sounds AND splits phrases on energy dips.
+    if energy is not None and energy_threshold > 0:
+        # Assuming energy is normalized 0-1
+        energy_mask = energy >= energy_threshold
+        # Combine with existing voicing (pitch confidence)
+        voicing_mask = voicing_mask & energy_mask
+        
+    # Check again after filtering
+    if not np.any(voicing_mask):
+        return []
+
+
+    # 1. Convert to MIDI (semitones)
+    # We use a mutable copy for smoothing
+    valid_pitch_mask = np.isfinite(pitch_hz) & (pitch_hz > 0)
+    voicing_mask = voicing_mask & valid_pitch_mask
+    if not np.any(voicing_mask):
+        return []
+    pitch_midi = np.zeros_like(pitch_hz)
+    pitch_midi[voicing_mask] = _hz_to_midi_array(pitch_hz[voicing_mask])
+    
+    # 2. Pre-smoothing (Vibrato Handling)
+    if smoothing_sigma_ms <= 0:
+        smoothed_midi = pitch_midi.copy()
+    else:
+        # Convert sigma from ms to frames
+        sigma_frames = (smoothing_sigma_ms / 1000.0) / frame_period_s
+        smoothed_midi = _smooth_pitch_contour(pitch_midi, voicing_mask, sigma_frames)
+    
+    # 3. Calculate Derivative
+    # d(pitch) / dt (semitones per second)
+    # np.gradient uses central differences to keep the derivative smooth.
+    d_pitch = np.gradient(smoothed_midi, timestamps)
+    if derivative_profile_out is not None:
+        derivative_profile_out["timestamps"] = np.asarray(timestamps, dtype=float).copy()
+        derivative_profile_out["values"] = np.asarray(d_pitch, dtype=float).copy()
+        derivative_profile_out["voiced_mask"] = np.asarray(voicing_mask, dtype=bool).copy()
+    
+    # 4. Find Stable Regions
+    # Condition: Voiced AND |Derivative| < Threshold
+    is_stable = (np.abs(d_pitch) < derivative_threshold) & voicing_mask
+    
+    # 5. Extract Regions
+    # Standard run-length encoding logic
+    events = []
+    
+    diff = np.diff(np.concatenate(([0], is_stable.astype(int), [0])))
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]
+    
+    tonic_midi_val = _resolve_tonic(tonic)
+    bias_semitones = float(bias_cents) / 100.0 if np.isfinite(bias_cents) else 0.0
+    
+    for start_idx, end_idx in zip(starts, ends):
+        duration = timestamps[min(end_idx, len(timestamps)-1)] - timestamps[start_idx]
+        if duration < min_event_duration:
+            continue
+            
+        # Extract segment data
+        segment_pitches = smoothed_midi[start_idx:end_idx]
+        segment_pitches = segment_pitches[np.isfinite(segment_pitches)]
+        if segment_pitches.size == 0:
+            continue
+        median_pitch = np.median(segment_pitches)
+        if not np.isfinite(median_pitch):
+            continue
+        median_pitch = float(median_pitch - bias_semitones)
+        
+        # Calculate mean energy for the segment
+        mean_energy = 0.0
+        if energy is not None and len(energy) > 0:
+            # Handle potential length mismatch if energy array is shorter/longer
+            seg_start = start_idx
+            seg_end = min(end_idx, len(energy))
+            if seg_start < seg_end:
+                mean_energy = float(np.mean(energy[seg_start:seg_end]))
+        
+        # 6. Snapping
+        snapped_pitch, error, label, keep_note = _snap_pitch(
+            float(median_pitch),
+            tonic_midi_val, 
+            snap_mode, 
+            allowed_raga_notes, 
+            snap_tolerance_cents
+        )
+        if not keep_note:
+            continue
+        if snapped_pitch is None:
+            continue
+        
+        event = TranscriptionEvent(
+            start=timestamps[start_idx],
+            end=timestamps[min(end_idx, len(timestamps)-1)],
+            pitch_midi=median_pitch,
+            snapped_midi=snapped_pitch,
+            sargam=label,
+            error_cents=error,
+            is_stable=True,
+            energy=mean_energy
+        )
+        events.append(event)
+        
+    return events
+
+
+def detect_pitch_inflection_points(
+    pitch_hz: np.ndarray,
+    timestamps: np.ndarray,
+    voicing_mask: np.ndarray,
+    smoothing_sigma_ms: float = 0.0,
+    frame_period_s: float = 0.01,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Detect points where the pitch derivative crosses zero (local peaks/valleys).
+    
+    Returns:
+        (times, values) arrays of inflection points
+    """
+    if len(pitch_hz) == 0 or not np.any(voicing_mask):
+        return np.array([]), np.array([])
+
+    pitch_midi = np.zeros_like(pitch_hz)
+    pitch_midi[voicing_mask] = _hz_to_midi_array(pitch_hz[voicing_mask])
+    
+    # Optional smoothing before inflection detection for vibrato reduction
+    if smoothing_sigma_ms > 0:
+        sigma_frames = (smoothing_sigma_ms / 1000.0) / frame_period_s
+        pitch_curve = _smooth_pitch_contour(pitch_midi, voicing_mask, sigma_frames)
+    else:
+        pitch_curve = pitch_midi
+        
+    # Calculate Gradient
+    grad = np.gradient(pitch_curve, timestamps)
+    
+    # Find zero crossings of gradient (sign change)
+    # Only consider voiced regions
+    grad[~voicing_mask] = np.nan # Avoid crossings at voiced/unvoiced boundaries
+    
+    # Sign of gradient
+    signs = np.sign(grad)
+    
+    # Diff of signs != 0 means change
+    # Note: sign(0) = 0. sign(-1) = -1. sign(1) = 1.
+    # Crossings: -1->1, 1->-1, -1->0, 0->1 etc.
+    
+    # We look for sign changes in valid regions
+    sign_diff = np.diff(signs)
+    
+    # Indices where sign changes and both neighbors are voiced (not NaN)
+    # Preserve NaNs so derivative crossings can be ignored for unvoiced gaps.
+    # So valid indices have finite diff
+    
+    crossing_indices = np.where(np.isfinite(sign_diff) & (sign_diff != 0))[0]
+    
+    return timestamps[crossing_indices], pitch_midi[crossing_indices]
+
+
+def _smooth_pitch_contour(
+    pitch_midi: np.ndarray, 
+    mask: np.ndarray, 
+    sigma: float
+) -> np.ndarray:
+    """Smooth pitch contour, handling unvoiced gaps by simple interpolation."""
+    # Copy to avoid modifying original
+    arr = pitch_midi.copy()
+    
+    # Indices
+    x = np.arange(len(arr))
+    
+    # If no voiced frames, return
+    if not np.any(mask):
+        return arr
+    
+    # Identify valid points
+    valid_x = x[mask]
+    valid_y = arr[mask]
+    
+    # Linear interpolation for everything (fill gaps)
+    interp_y = np.interp(x, valid_x, valid_y)
+    
+    # Gaussian smooth
+    smoothed = ndimage.gaussian_filter1d(interp_y, sigma=sigma)
+    
+    # We still only care about the originally voiced parts' derivatives (mostly)
+    # But returning the full smoothed array lets gradient work everywhere.
+    return smoothed
+
+
+def _sample_energy_at_time(
+    time_s: float,
+    energy_values: Optional[np.ndarray],
+    energy_times: Optional[np.ndarray],
+) -> float:
+    """
+    Sample the nearest frame energy for a timestamp.
+
+    energy_values and energy_times should already be length-aligned.
+    """
+    if (
+        energy_values is None
+        or energy_times is None
+        or energy_values.size == 0
+        or energy_times.size == 0
+        or not np.isfinite(time_s)
+    ):
+        return 0.0
+
+    idx = int(np.searchsorted(energy_times, time_s))
+    if idx <= 0:
+        nearest_idx = 0
+    elif idx >= energy_times.size:
+        nearest_idx = int(energy_times.size - 1)
+    else:
+        prev_idx = idx - 1
+        nearest_idx = idx if abs(energy_times[idx] - time_s) < abs(energy_times[prev_idx] - time_s) else prev_idx
+
+    sampled = float(energy_values[nearest_idx])
+    if not np.isfinite(sampled):
+        return 0.0
+    return sampled
+
+
+def _snap_pitch(
+    pitch: float,
+    tonic_midi: float,
+    mode: str,
+    allowed_pcs: Optional[List[int]],
+    tolerance_cents: float,
+) -> Tuple[Optional[float], float, str, bool]:
+    """
+    Snap a raw MIDI pitch to a target scale.
+    Returns: (snapped_pitch, error_in_cents, label, keep_note)
+    """
+    # Reserved for backwards-compatible call sites.
+    _ = tolerance_cents
+
+    # 1. Normalize to 0-11 relative to tonic
+    # Note: tonic_midi might be e.g. 61.5 (if microtonal tonic)
+    # But usually standard MIDI integers.
+    
+    semitone_offset = pitch - tonic_midi
+    
+    # Determine nearest and second-nearest chromatic semitones
+    lower = int(math.floor(semitone_offset))
+    upper = int(math.ceil(semitone_offset))
+    candidate_offsets = [lower] if lower == upper else [lower, upper]
+    candidate_offsets.sort(key=lambda x: abs(semitone_offset - x))
+
+    closest_offset = candidate_offsets[0]
+    closest_pitch = tonic_midi + closest_offset
+    closest_pc = int(closest_offset % 12)
+    error_closest = (pitch - closest_pitch) * 100
+
+    if mode == "raga" and allowed_pcs:
+        allowed_sorted = sorted({int(pc) % 12 for pc in allowed_pcs})
+        if not allowed_sorted:
+            return None, 0.0, "", False
+
+        center_oct = int(round(semitone_offset)) // 12
+        candidates: List[float] = []
+        for oct_shift in (-1, 0, 1):
+            octave = center_oct + oct_shift
+            for pc in allowed_sorted:
+                offset = (octave * 12) + pc
+                candidates.append(float(tonic_midi + offset))
+
+        if not candidates:
+            return None, 0.0, "", False
+
+        eps = 1e-9
+        dist_candidates = [(abs(c - pitch), c) for c in candidates]
+        min_dist = min(item[0] for item in dist_candidates)
+        nearest = [item for item in dist_candidates if abs(item[0] - min_dist) <= eps]
+
+        # Deterministic tie-break: prefer higher candidate.
+        best_dist, best_pitch = max(nearest, key=lambda item: item[1])
+        if best_dist > 1.0 + eps:
+            return None, 0.0, "", False
+
+        error_best = (pitch - best_pitch) * 100
+        return best_pitch, error_best, _get_sargam_label(best_pitch, tonic_midi), True
+
+    return closest_pitch, error_closest, _get_sargam_label(closest_pitch, tonic_midi), True
+
+
+def _get_sargam_label(midi_val: float, tonic_midi: float) -> str:
+    from .sequence import OFFSET_TO_SARGAM
+    offset = int(round(midi_val - tonic_midi)) % 12
+    base = OFFSET_TO_SARGAM.get(offset, "?")
+    
+    octave_shift = int(round((midi_val - tonic_midi) / 12))
+    if octave_shift > 0:
+        return base + "·" * octave_shift
+    elif octave_shift < 0:
+        return base + "'" * abs(octave_shift)
+    return base
+
+
+def _resolve_tonic(tonic: Union[int, str, float]) -> float:
+    """Resolve tonic to an absolute MIDI value."""
+    if isinstance(tonic, (float, np.floating)) and tonic > 200:
+        # Treat large float values as Hz and map them to MIDI.
+        hz_midi = _hz_to_midi_scalar(float(tonic))
+        if np.isfinite(hz_midi):
+            return float(hz_midi)
+        return 60.0
+
+    if isinstance(tonic, (int, float, np.integer, np.floating)):
+        return float(tonic)
+
+    if isinstance(tonic, str):
+        parsed_note = _parse_note_to_midi(tonic)
+        if parsed_note is not None:
+            return float(parsed_note)
+        # Fall back to pitch-class parsing and anchor at octave 4.
+        return float(60 + tonic_to_midi_class(tonic))
+
+    return 60.0
+
+
+def transcribe_to_notes(
+    pitch_hz: np.ndarray,
+    timestamps: np.ndarray,
+    voicing_mask: np.ndarray,
+    tonic: Union[int, str, float],
+    # Energy parameters
+    energy: Optional[np.ndarray] = None,
+    energy_threshold: float = 0.0,
+    # Configurable parameters
+    smoothing_sigma_ms: float = 70.0,
+    frame_period_s: float = 0.01,
+    derivative_threshold: float = 2.0,
+    min_event_duration: float = 0.04,
+    snap_mode: Literal["chromatic", "raga"] = "chromatic",
+    allowed_raga_notes: Optional[List[int]] = None,
+    snap_tolerance_cents: float = 35.0,
+    transcription_min_duration: float = 0.0,  # Alias for min_event_duration if passed via explicit config
+    bias_cents: float = 0.0,
+    derivative_profile_out: Optional[Dict[str, np.ndarray]] = None,
+) -> List[Note]:
+    """
+    Unified entry point: Combines Stationary Events + Inflection Points.
+    
+    1. Detect Stationary Events (Orange Bars).
+    2. Detect Inflection Points (Red Points).
+    3. Filter Inflection Points overlapping Stationary Events.
+    4. Convert all to Note objects.
+    """
+    if transcription_min_duration > 0:
+        min_event_duration = transcription_min_duration
+
+    aligned_energy_values: Optional[np.ndarray] = None
+    aligned_energy_times: Optional[np.ndarray] = None
+    if energy is not None and len(energy) > 0 and len(timestamps) > 0:
+        aligned_len = min(len(energy), len(timestamps))
+        aligned_energy_values = np.asarray(energy[:aligned_len], dtype=float)
+        aligned_energy_times = np.asarray(timestamps[:aligned_len], dtype=float)
+    
+    # 1. Stationary Events
+    events = detect_stationary_events(
+        pitch_hz=pitch_hz,
+        timestamps=timestamps,
+        voicing_mask=voicing_mask,
+        tonic=tonic,
+        energy=energy,
+        energy_threshold=energy_threshold,
+        smoothing_sigma_ms=smoothing_sigma_ms,
+        frame_period_s=frame_period_s,
+        derivative_threshold=derivative_threshold,
+        min_event_duration=min_event_duration,
+        snap_mode=snap_mode,
+        allowed_raga_notes=allowed_raga_notes,
+        snap_tolerance_cents=snap_tolerance_cents,
+        bias_cents=bias_cents,
+        derivative_profile_out=derivative_profile_out,
+    )
+    
+    # 2. Inflection Points
+    inf_times, inf_pitches = detect_pitch_inflection_points(
+        pitch_hz=pitch_hz,
+        timestamps=timestamps,
+        voicing_mask=voicing_mask,
+        smoothing_sigma_ms=smoothing_sigma_ms,
+        frame_period_s=frame_period_s,
+    )
+    
+    # 3. Filter Inflections
+    if len(inf_times) > 0 and events:
+        keep_mask = np.ones(len(inf_times), dtype=bool)
+        for evt in events:
+            # Overlap check
+            overlap = (inf_times >= evt.start) & (inf_times <= evt.end)
+            keep_mask[overlap] = False
+        
+        inf_times = inf_times[keep_mask]
+        inf_pitches = inf_pitches[keep_mask]
+        
+    # 4. Convert to Notes
+    final_notes = []
+    
+    # Add Stationary Notes
+    for evt in events:
+        raw_pitch = float(evt.pitch_midi)
+        snapped_pitch = float(evt.snapped_midi)
+        n = Note(
+            start=evt.start,
+            end=evt.end,
+            # Use snapped pitch as canonical note pitch so downstream correction
+            # and phrase logic operate on the same values shown in overlays.
+            pitch_midi=snapped_pitch,
+            pitch_hz=float(_midi_to_hz_scalar(snapped_pitch)),
+            confidence=1.0, 
+            sargam=evt.sargam, # Pre-calculated
+            energy=evt.energy
+        )
+        # Preserve raw pitch so downstream raga correction can use continuous
+        # distance against the original contour instead of pre-quantized values.
+        n.raw_pitch_midi = raw_pitch
+        n.raw_pitch_hz = float(_midi_to_hz_scalar(raw_pitch))
+        n.snapped_pitch_midi = snapped_pitch
+        n.corrected_pitch_midi = snapped_pitch
+        n.rendered_pitch_midi = snapped_pitch
+        # Keep pitch class handy for downstream analysis.
+        n.pitch_class = int(round(snapped_pitch)) % 12
+        final_notes.append(n)
+        
+    # Add Inflection Notes
+    # These are instant points. We give them a tiny duration (e.g. 10ms)
+    # Point notes get a small fixed duration for visualization.
+    point_duration = 0.01 
+    
+    tonic_midi_val = _resolve_tonic(tonic)
+    bias_semitones = float(bias_cents) / 100.0 if np.isfinite(bias_cents) else 0.0
+    
+    for t, p in zip(inf_times, inf_pitches):
+        raw_pitch = float(p - bias_semitones)
+        sampled_energy = _sample_energy_at_time(
+            float(t),
+            aligned_energy_values,
+            aligned_energy_times,
+        )
+        if energy is not None and energy_threshold > 0 and sampled_energy < energy_threshold:
+            continue
+
+        # Still snap inflection points so they can show sargam labels.
+        snapped, _, sargam, keep_note = _snap_pitch(
+            raw_pitch, tonic_midi_val, snap_mode, allowed_raga_notes, snap_tolerance_cents
+        )
+        if not keep_note or snapped is None:
+            continue
+        snapped_pitch = float(snapped)
+        
+        n = Note(
+            start=t,
+            end=t + point_duration,
+            pitch_midi=snapped_pitch,
+            pitch_hz=float(_midi_to_hz_scalar(snapped_pitch)),
+            confidence=0.8, # Lower confidence for transient points
+            energy=sampled_energy,
+            sargam=sargam,
+            pitch_class=int(round(snapped_pitch)) % 12
+        )
+        n.raw_pitch_midi = raw_pitch
+        n.raw_pitch_hz = float(_midi_to_hz_scalar(raw_pitch))
+        n.snapped_pitch_midi = snapped_pitch
+        n.corrected_pitch_midi = snapped_pitch
+        n.rendered_pitch_midi = snapped_pitch
+        final_notes.append(n)
+        
+    # 5. Sort by start time
+    final_notes.sort(key=lambda x: x.start)
+    
+    return final_notes

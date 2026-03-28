@@ -1,0 +1,1193 @@
+"""
+Raga module: database, candidate matching, feature extraction, and scoring.
+
+This module implements the exact scoring algorithm from ssje_tweaked_wit_peaks.ipynb.
+
+Provides:
+- RagaDatabase: Load and query raga definitions
+- generate_candidates: Generate (raga, tonic) candidates from pitch classes
+- score_candidates: Score using the 8-coefficient algorithm from the notebook
+- RagaScorer: Orchestrates the full scoring pipeline
+"""
+
+from dataclasses import dataclass, field
+from collections import defaultdict
+from typing import List, Set, Dict, Tuple, Optional, Union, Any
+import os
+import re
+import numpy as np
+import pandas as pd
+import librosa
+from .sequence import Note, midi_to_sargam
+
+from .config import PipelineConfig
+from .audio import PitchData
+from .analysis import HistogramData, PeakData
+
+
+# =============================================================================
+# SCORING PARAMETERS (from notebook)
+# =============================================================================
+
+@dataclass
+class ScoringParams:
+    """Scoring coefficients from the notebook."""
+    
+    EPS: float = 1e-12
+    ALPHA_MATCH: float = 0.40          # match mass coefficient
+    BETA_PRESENCE: float = 0.25        # presence coefficient
+    GAMMA_LOGLIKE: float = 1.0         # log-likelihood coefficient
+    DELTA_EXTRA: float = 1.10          # extra mass penalty (-ve)
+    COMPLEX_PENALTY: float = 0.1       # complexity penalty (-ve)
+    MATCH_SIZE_GAMMA: float = 0.25     # size mismatch coefficient
+    TONIC_SALIENCE_WEIGHT: float = 0.12  # tonic salience weight
+    SCALE: float = 1000.0
+    USE_PRESENCE_MEAN: bool = True     # mean vs sum/sqrt
+    USE_NORM_PRIMARY: bool = True
+    WINDOW_CENTS: float = 35.0         # window for note mass computation
+
+
+DEFAULT_SCORING_PARAMS = ScoringParams()
+
+
+# =============================================================================
+# TONIC BIAS CONSTANTS (for instrumental/vocal source types)
+# =============================================================================
+
+# Tonic bias ranges (pitch class 0-11, where 0=C)
+# These restrict candidate tonics based on source type and instrument/vocalist
+TONIC_BIAS = {
+    # Vocalist gender (biases toward typical vocal ranges)
+    "vocal_female": [7, 8, 9, 10, 11, 0],     # G, G#, A, A#, B, C (bias around A-A#)
+    "vocal_male": [11, 0, 1, 2, 3, 4, 5],     # B, C, C#, D, D#, E, F (bias around D-D#)
+    
+    # Instrument-specific tonic ranges
+    "sarod": [10, 11, 0, 1, 2],               # A#, B, C, C#, D
+    "sitar": [1, 2, 3],                       # C#, D, D#
+    "bansuri": [2, 3, 4, 5],                  # D, D#, E, F
+    "slide_guitar": [1, 2, 3],                # C#, D, D#
+    
+    # Default: all tonics allowed
+    "autodetect": list(range(12)),
+}
+
+
+def get_tonic_candidates(
+    source_type: str,
+    vocalist_gender: Optional[str] = None,
+    instrument_type: Optional[str] = "autodetect",
+) -> List[int]:
+    """
+    Get list of valid tonic candidates based on source configuration.
+    
+    Args:
+        source_type: "mixed", "instrumental", or "vocal"
+        vocalist_gender: "male" or "female" (only for source_type="vocal")
+        instrument_type: Instrument name (only for source_type="instrumental")
+        
+    Returns:
+        List of pitch classes (0-11) to use as candidate tonics
+    """
+    if source_type == "vocal" and vocalist_gender:
+        key = f"vocal_{vocalist_gender}"
+        if key in TONIC_BIAS:
+            return TONIC_BIAS[key].copy()
+    
+    if source_type == "instrumental" and instrument_type:
+        if instrument_type in TONIC_BIAS:
+            return TONIC_BIAS[instrument_type].copy()
+    
+    # Default: all tonics
+    return list(range(12))
+
+
+# =============================================================================
+# DATA CLASSES
+# =============================================================================
+
+@dataclass
+class Candidate:
+    """A (raga, tonic) candidate for scoring."""
+    
+    tonic: int                    # 0-11 (pitch class of Sa)
+    mask: Tuple[int, ...]         # 12-bit binary mask (absolute, not rotated)
+    raga_names: List[str]         # Matching raga names
+    intervals: Tuple[int, ...] = field(default_factory=tuple)
+
+
+@dataclass
+class ScoredCandidate:
+    """Scoring result for a single candidate."""
+    
+    raga: str
+    tonic: int
+    tonic_name: str
+    salience: int                 # Raw accompaniment count at tonic
+    fit_score: float              # Final score (scaled)
+    primary_score: float          # Sa + Pa/Ma bonus
+    match_mass: float
+    extra_mass: float
+    observed_note_score: float    # Presence score
+    loglike_norm: float
+    raga_size: int
+    match_diff: int               # |raga_size - detected_peaks|
+    complexity_pen: float
+    melody_dist: tuple = ()       # 12-bin tonic-rotated melody distribution
+    accomp_dist: tuple = ()       # 12-bin tonic-rotated accompaniment distribution
+    valley_penalty: int = 0       # Count of raga notes at valleys (not peaks)
+
+
+# =============================================================================
+# AAROH/AVROH DIRECTIONAL PATTERNS
+# =============================================================================
+
+_AAROH_AVROH_CHAR_TO_PC = {
+    "S": 0, "s": 0,
+    "r": 1,
+    "R": 2,
+    "g": 3,
+    "G": 4,
+    "m": 5,
+    "M": 6,
+    "P": 7, "p": 7,
+    "d": 8,
+    "D": 9,
+    "n": 10,
+    "N": 11,
+}
+
+
+@dataclass
+class AarohAvrohPattern:
+    """Directional note presence for one raga."""
+    raga_name: str
+    source_raga_name: str
+    aaroh_raw: str
+    avroh_raw: str
+    aaroh_pattern: Tuple[float, ...]
+    avroh_pattern: Tuple[float, ...]
+
+
+def _normalize_raga_name(name: str) -> str:
+    """Normalize raga names across CSV variants for matching."""
+    if not name:
+        return ""
+    normalized = str(name).strip().lower()
+    normalized = re.sub(r"\(.*?\)", "", normalized)
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", normalized)
+    return " ".join(normalized.split())
+
+
+def _parse_directional_sequence_to_pattern(sequence: str) -> Tuple[float, ...]:
+    """
+    Parse Aaroh/Avroh text (e.g. S-R-G-m-P-d-n-S) into a 12-note presence vector.
+
+    Handles packed symbols like Gg, Rr, Nn by scanning character-wise.
+    """
+    presence = [0.0] * 12
+    if sequence is None:
+        return tuple(presence)
+
+    text = str(sequence)
+    for char in text:
+        pitch_class = _AAROH_AVROH_CHAR_TO_PC.get(char)
+        if pitch_class is not None:
+            presence[pitch_class] = 1.0
+
+    return tuple(presence)
+
+
+def build_aaroh_avroh_subset(
+    aaroh_avroh_csv_path: str,
+    raga_db_csv_path: str,
+    output_csv_path: str,
+) -> pd.DataFrame:
+    """
+    Build a subset of aaroh/avroh rows aligned to names from raga_list_final.csv.
+
+    The output keeps the canonical raga-list name in `raga_name` and preserves the
+    matched source row name in `RAGATABLE`.
+    """
+    source_df = pd.read_csv(aaroh_avroh_csv_path)
+    raga_df = pd.read_csv(raga_db_csv_path)
+
+    if "RAGATABLE" not in source_df.columns or "Aroha" not in source_df.columns or "Avroh" not in source_df.columns:
+        raise ValueError(
+            "aaroh/avroh CSV must contain columns: RAGATABLE, Aroha, Avroh"
+        )
+    if "names" not in raga_df.columns:
+        raise ValueError("raga DB CSV must contain a 'names' column")
+
+    source_lookup: Dict[str, dict] = {}
+    for _, row in source_df.iterrows():
+        source_name = str(row["RAGATABLE"]).strip()
+        key = _normalize_raga_name(source_name)
+        if key and key not in source_lookup:
+            source_lookup[key] = {
+                "RAGATABLE": source_name,
+                "Aroha": str(row["Aroha"]).strip() if pd.notna(row["Aroha"]) else "",
+                "Avroh": str(row["Avroh"]).strip() if pd.notna(row["Avroh"]) else "",
+            }
+
+    canonical_names: List[str] = []
+    seen_names: Set[str] = set()
+    for _, row in raga_df.iterrows():
+        names_raw = str(row["names"]).strip() if pd.notna(row["names"]) else ""
+        names = [part.strip() for part in names_raw.split(",") if part.strip()]
+        for name in names:
+            key = _normalize_raga_name(name)
+            if key and key not in seen_names:
+                seen_names.add(key)
+                canonical_names.append(name)
+
+    subset_rows: List[dict] = []
+    for canonical_name in canonical_names:
+        key = _normalize_raga_name(canonical_name)
+        matched = source_lookup.get(key)
+        if not matched:
+            continue
+        subset_rows.append({
+            "raga_name": canonical_name,
+            "RAGATABLE": matched["RAGATABLE"],
+            "Aroha": matched["Aroha"],
+            "Avroh": matched["Avroh"],
+        })
+
+    subset_df = pd.DataFrame(
+        subset_rows,
+        columns=["raga_name", "RAGATABLE", "Aroha", "Avroh"],
+    )
+
+    output_dir = os.path.dirname(output_csv_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    subset_df.to_csv(output_csv_path, index=False)
+
+    return subset_df
+
+
+def load_aaroh_avroh_patterns(csv_path: str) -> Dict[str, AarohAvrohPattern]:
+    """Load aaroh/avroh patterns keyed by normalized raga name."""
+    df = pd.read_csv(csv_path)
+
+    name_col = "raga_name" if "raga_name" in df.columns else "RAGATABLE"
+    source_col = "RAGATABLE" if "RAGATABLE" in df.columns else name_col
+    if "Aroha" not in df.columns or "Avroh" not in df.columns:
+        raise ValueError("Pattern CSV must contain Aroha and Avroh columns")
+
+    patterns: Dict[str, AarohAvrohPattern] = {}
+    for _, row in df.iterrows():
+        raga_name = str(row[name_col]).strip()
+        if not raga_name:
+            continue
+        normalized = _normalize_raga_name(raga_name)
+        if not normalized or normalized in patterns:
+            continue
+
+        aaroh_raw = str(row["Aroha"]).strip() if pd.notna(row["Aroha"]) else ""
+        avroh_raw = str(row["Avroh"]).strip() if pd.notna(row["Avroh"]) else ""
+        source_name = str(row[source_col]).strip() if pd.notna(row[source_col]) else raga_name
+
+        patterns[normalized] = AarohAvrohPattern(
+            raga_name=raga_name,
+            source_raga_name=source_name,
+            aaroh_raw=aaroh_raw,
+            avroh_raw=avroh_raw,
+            aaroh_pattern=_parse_directional_sequence_to_pattern(aaroh_raw),
+            avroh_pattern=_parse_directional_sequence_to_pattern(avroh_raw),
+        )
+
+    return patterns
+
+
+def get_aaroh_avroh_pattern_for_raga(
+    raga_name: str,
+    pattern_lookup: Dict[str, AarohAvrohPattern],
+) -> Optional[AarohAvrohPattern]:
+    """Resolve aaroh/avroh pattern using exact then fuzzy name matching."""
+    if not raga_name or not pattern_lookup:
+        return None
+
+    candidates = [part.strip() for part in str(raga_name).split(",") if part.strip()]
+    if not candidates:
+        return None
+
+    for candidate in candidates:
+        key = _normalize_raga_name(candidate)
+        if key in pattern_lookup:
+            return pattern_lookup[key]
+
+    for candidate in candidates:
+        key = _normalize_raga_name(candidate)
+        for pattern_key, pattern in pattern_lookup.items():
+            if key and (key in pattern_key or pattern_key in key):
+                return pattern
+
+    return None
+
+
+# =============================================================================
+# RAGA DATABASE
+# =============================================================================
+
+class RagaDatabase:
+    """
+    Load and query raga definitions from CSV.
+    """
+    
+    def __init__(self, csv_path: str):
+        self.csv_path = csv_path
+        self.df = pd.read_csv(csv_path)
+        
+        # Build lookup tables
+        self.interval_lookup: Dict[Tuple, List[dict]] = defaultdict(list)
+        self.name_to_mask: Dict[str, Tuple[int, ...]] = {}
+        self.all_ragas: List[dict] = []
+        
+        self._build_lookups()
+    
+    def _build_lookups(self):
+        """Build interval and name lookup tables."""
+        for _, row in self.df.iterrows():
+            # Parse mask
+            if "mask" in self.df.columns and pd.notna(row.get("mask")):
+                raw = row["mask"]
+                if isinstance(raw, str):
+                    parts = [x.strip() for x in raw.split(",") if x.strip()]
+                    try:
+                        mask_abs = tuple(int(x) for x in parts)
+                    except Exception:
+                        mask_abs = None
+                else:
+                    mask_abs = None
+            else:
+                mask_abs = None
+            
+            if mask_abs is None:
+                try:
+                    # Try positional lookup using iloc (safest for 0-11 columns)
+                    # We look for 12 columns that might hold the pitch class mask
+                    # Assuming they are the first 12 or named 0-11
+                    mask_abs = tuple(int(row.iloc[i]) for i in range(12))
+                except Exception:
+                    try:
+                        mask_abs = tuple(int(row[str(i)]) for i in range(12))
+                    except Exception:
+                        continue
+            
+            # Get names
+            names_raw = row.get("names") if "names" in self.df.columns else row.get("raga", f"raga_{_}")
+            names = self._parse_names(names_raw)
+            
+            # Get pitch classes from mask
+            mask_arr = np.array(mask_abs, dtype=int)
+            pitch_classes = np.where(mask_arr == 1)[0]
+            if len(pitch_classes) < 2:
+                continue
+            
+            # Compute interval pattern
+            pitch_classes_sorted = np.sort(pitch_classes)
+            intervals = tuple(
+                np.mod(np.diff(np.concatenate((pitch_classes_sorted, [pitch_classes_sorted[0] + 12]))), 12)
+            )
+            
+            if sum(intervals) != 12:
+                continue
+            
+            canonical = self._canonical_intervals(intervals)
+            
+            raga_entry = {
+                "names": names,
+                "mask": mask_abs,
+                "pitch_classes": tuple(pitch_classes_sorted),
+                "intervals": intervals,
+                "size": len(pitch_classes),
+            }
+            
+            self.interval_lookup[canonical].append(raga_entry)
+            self.all_ragas.append(raga_entry)
+            
+            for name in names:
+                self.name_to_mask[name.lower()] = mask_abs
+    
+    def _parse_names(self, names_raw) -> List[str]:
+        if pd.isna(names_raw):
+            return ["Unknown"]
+        names_str = str(names_raw).strip()
+        if names_str.startswith("[") and names_str.endswith("]"):
+            names_str = names_str[1:-1].replace('"', "").replace("'", "")
+        names = [n.strip() for n in names_str.split(",") if n.strip()]
+        return names if names else ["Unknown"]
+    
+    def _canonical_intervals(self, intervals: Tuple[int, ...]) -> Tuple[int, ...]:
+        if not intervals:
+            return tuple()
+        return min(tuple(np.roll(intervals, i)) for i in range(len(intervals)))
+    
+    def get_interval_lookup(self) -> Dict[Tuple, List[dict]]:
+        return self.interval_lookup
+
+
+# =============================================================================
+# CANDIDATE GENERATION & SCORING
+# =============================================================================
+
+def generate_candidates(
+    pitch_classes: Set[int],
+    raga_db: RagaDatabase,
+) -> List[Candidate]:
+    """
+    Generate (raga, tonic) candidates from detected pitch classes.
+    """
+    if not pitch_classes:
+        return []
+    
+    candidates = []
+    pitch_classes_arr = np.array(sorted(pitch_classes))
+    k = len(pitch_classes_arr)
+    
+    intervals = np.mod(
+        np.diff(np.concatenate((pitch_classes_arr, [pitch_classes_arr[0] + 12]))), 12
+    )
+    
+    interval_lookup = raga_db.get_interval_lookup()
+    
+    for j in range(k):
+        tonic = int(pitch_classes_arr[j])
+        rotated_intervals = tuple(np.roll(intervals, -j))
+        canonical = raga_db._canonical_intervals(rotated_intervals)
+        
+        if canonical in interval_lookup:
+            raga_group = interval_lookup[canonical]
+            matching_ragas = [r for r in raga_group if r["intervals"] == rotated_intervals]
+            
+            if matching_ragas:
+                current_note = 0
+                relative_notes = {0}
+                for step in rotated_intervals[:-1]:
+                    current_note += step
+                    relative_notes.add(current_note)
+                
+                mask_rel = tuple(1 if i in relative_notes else 0 for i in range(12))
+                all_names = []
+                for r in matching_ragas:
+                    all_names.extend(r["names"])
+                
+                candidates.append(Candidate(
+                    tonic=tonic,
+                    mask=mask_rel,
+                    raga_names=all_names,
+                    intervals=rotated_intervals,
+                ))
+    
+    return candidates
+
+
+def score_candidates_full(
+    pitch_data_vocals: PitchData,
+    pitch_data_accomp: Optional[PitchData],
+    raga_db: RagaDatabase,
+    detected_peak_count: int,
+    instrument_mode: str = "autodetect",
+    params: ScoringParams = DEFAULT_SCORING_PARAMS,
+    tonic_candidates: Optional[List[int]] = None,
+    bias_cents: Optional[float] = None,
+    raga_filter: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Full scoring pipeline matching the notebook exactly.
+    
+    This computes cent-level histograms, applies accompaniment salience filtering,
+    and scores all ragas against all allowed tonics.
+    
+    Args:
+        pitch_data_vocals: Pitch data from melody/vocals
+        pitch_data_accomp: Pitch data from accompaniment (can be None)
+        raga_db: Raga database
+        detected_peak_count: Number of detected peaks
+        instrument_mode: Source type for fallback tonic selection
+        params: Scoring parameters
+        tonic_candidates: Optional list of allowed tonics (from get_tonic_candidates)
+        raga_filter: Optional raga name constraint (comma-separated allowed)
+    """
+    EPS = params.EPS
+    
+    # === Build cent-level histogram for melody ===
+    midi_vals_mel = pitch_data_vocals.midi_vals
+    cent_vals_mel = (midi_vals_mel % 12) * 100.0
+    if bias_cents is not None:
+        cent_vals_mel = (cent_vals_mel - bias_cents) % 1200
+    
+    num_bins = int(1200 / 1.0)  # 1-cent bins
+    bin_edges = np.linspace(0.0, 1200.0, num_bins + 1)
+    cent_hist, _ = np.histogram(cent_vals_mel, bins=bin_edges, range=(0.0, 1200.0))
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    
+    # === Mass within window for each note ===
+    def mass_within_window_for_note(note_idx):
+        center = (note_idx * 100.0) % 1200.0
+        diff = np.abs(bin_centers - center)
+        diff = np.minimum(diff, 1200.0 - diff)  # circular
+        return float(np.sum(cent_hist[diff <= params.WINDOW_CENTS]))
+    
+    note_masses_raw = np.array([mass_within_window_for_note(i) for i in range(12)], dtype=float)
+    H_pc_arr = note_masses_raw.copy()
+
+    # Smoothed histogram for valley detection (Gaussian, sigma=5 cents)
+    from scipy.ndimage import gaussian_filter1d
+    cent_hist_smooth = gaussian_filter1d(cent_hist.astype(float), sigma=5.0, mode='wrap')
+
+    # Normalized probability distribution
+    p_pc = (H_pc_arr + EPS) / (np.sum(H_pc_arr) + 12 * EPS)
+    
+    # === Accompaniment salience (only if accompaniment available) ===
+    has_accompaniment = pitch_data_accomp is not None and len(pitch_data_accomp.midi_vals) > 0
+    
+    if has_accompaniment:
+        assert pitch_data_accomp is not None
+        midi_vals_acc = pitch_data_accomp.midi_vals
+        pitch_classes_acc = np.mod(np.round(midi_vals_acc), 12).astype(int)
+        H_acc, _ = np.histogram(pitch_classes_acc, bins=12, range=(0, 12))
+        salience_all_tonics = {t: int(H_acc[t]) for t in range(12)}
+        max_acc = float(H_acc.max()) if H_acc.size and H_acc.max() > 0 else 1.0
+        
+        # Tonic filtering based on mean salience
+        mean_salience = float(np.mean(list(salience_all_tonics.values())))
+        surviving_tonics = [t for t, a in salience_all_tonics.items() if a > mean_salience]
+        
+        print(f"[SCORING] Mean accomp salience = {mean_salience:.1f}; {len(surviving_tonics)} surviving tonics")
+    else:
+        # No accompaniment - use melody histogram peaks as tonic hints
+        salience_all_tonics = {t: 0 for t in range(12)}
+        max_acc = 1.0
+        mean_salience = 0.0
+        surviving_tonics = []
+        print("[SCORING] No accompaniment - using tonic bias or all tonics")
+    
+    # === Determine allowed tonics ===
+    # Priority: explicit tonic_candidates > tonic bias > accompaniment filtering > all
+    if tonic_candidates is not None and len(tonic_candidates) > 0:
+        allowed_tonics = tonic_candidates.copy()
+        print(f"[SCORING] Using tonic candidates: {allowed_tonics}")
+    elif has_accompaniment and len(surviving_tonics) > 0:
+        allowed_tonics = surviving_tonics.copy()
+    else:
+        allowed_tonics = list(range(12))
+    
+    print(f"[SCORING] Using tonics: {allowed_tonics}")
+    
+    raga_filter_keys: List[str] = []
+    if raga_filter:
+        raga_filter_keys = [
+            _normalize_raga_name(part)
+            for part in str(raga_filter).split(",")
+            if part.strip()
+        ]
+
+    # === Score all ragas ===
+    final_results = []
+    
+    for raga_entry in raga_db.all_ragas:
+        if raga_filter_keys:
+            names = raga_entry.get("names", [])
+            matched = False
+            for name in names:
+                if _normalize_raga_name(name) in raga_filter_keys:
+                    matched = True
+                    break
+            if not matched:
+                continue
+        mask_abs = np.array(raga_entry["mask"], dtype=int)
+        names = raga_entry["names"]
+        
+        if mask_abs.sum() < 2:
+            continue
+        
+        for tonic in allowed_tonics:
+            # Tonic salience check for autodetect (only when we have accompaniment)
+            tonic_sal = float(salience_all_tonics.get(tonic, 0))
+            if has_accompaniment and tonic_candidates is None and instrument_mode == "autodetect" and tonic_sal <= mean_salience:
+                continue
+            
+            # Rotate observed distribution
+            p_rot = np.roll(p_pc, -tonic)
+            
+            raga_note_indices = np.where(mask_abs == 1)[0].tolist()
+            raga_size = len(raga_note_indices)
+            
+            # Size penalty
+            size_diff = abs(raga_size - detected_peak_count)
+            size_penalty = params.MATCH_SIZE_GAMMA * (size_diff / 4.0)
+            
+            if raga_size < 2:
+                continue
+            
+            # Match mass (fraction on allowed notes)
+            match_mass = float(np.sum(p_rot[raga_note_indices]))
+            extra_mass = float(1.0 - match_mass)
+            
+            # Presence (peak-normalized)
+            peak = float(np.max(p_rot) + EPS)
+            pres = (p_rot[raga_note_indices] / peak)
+            
+            if params.USE_PRESENCE_MEAN:
+                observed_note_score = float(np.mean(pres)) if raga_size > 0 else 0.0
+            else:
+                observed_note_score = float(np.sum(pres) / (np.sqrt(raga_size) + EPS))
+            
+            # Log-likelihood
+            sum_logp = float(np.sum(np.log(p_rot[raga_note_indices] + EPS)))
+            baseline = -np.log(12.0)
+            avg_logp = sum_logp / (raga_size + EPS)
+            loglike_norm = 1.0 + (avg_logp / (-baseline + EPS))
+            loglike_norm = max(0.0, min(1.0, loglike_norm))
+            
+            # Complexity penalty
+            complexity_pen = max(0.0, (raga_size - 5) / 12.0)
+            
+            # Primary score (Sa + Pa/Ma bonus)
+            if params.USE_NORM_PRIMARY:
+                prim = float(p_rot[0])
+                bonus_options = [0.0]
+                if mask_abs[5] == 1:
+                    bonus_options.append(float(p_rot[5]))
+                if mask_abs[6] == 1:
+                    bonus_options.append(float(p_rot[6]))
+                if mask_abs[7] == 1:
+                    bonus_options.append(float(p_rot[7]))
+                primary_score = prim + max(bonus_options)
+            else:
+                H_rot_counts = np.roll(H_pc_arr, -tonic)
+                sa_bonus = float(H_rot_counts[0])
+                bonus_options = [0.0]
+                if mask_abs[5] == 1:
+                    bonus_options.append(float(H_rot_counts[5]))
+                if mask_abs[6] == 1:
+                    bonus_options.append(float(H_rot_counts[6]))
+                if mask_abs[7] == 1:
+                    bonus_options.append(float(H_rot_counts[7]))
+                primary_score = sa_bonus + max(bonus_options)
+            
+            # Combined fit score
+            fit_norm = (
+                params.ALPHA_MATCH * match_mass +
+                params.BETA_PRESENCE * observed_note_score +
+                params.GAMMA_LOGLIKE * loglike_norm
+            ) - (
+                params.DELTA_EXTRA * extra_mass +
+                params.COMPLEX_PENALTY * complexity_pen +
+                size_penalty
+            )
+            
+            # Tonic salience boost
+            tonic_sal_norm = tonic_sal / (max_acc + EPS)
+            fit_norm += params.TONIC_SALIENCE_WEIGHT * tonic_sal_norm
+            
+            fit_norm = max(-1.0, min(1.0, fit_norm))
+            fit_score = float(fit_norm * params.SCALE)
+
+            # --- Melody distribution (tonic-rotated, normalized) ---
+            melody_dist = tuple(float(v) for v in p_rot)
+
+            # --- Accompaniment distribution (tonic-rotated, normalized) ---
+            if has_accompaniment:
+                accomp_rot = np.roll(H_acc.astype(float), -tonic)
+                accomp_sum = float(accomp_rot.sum())
+                if accomp_sum > 0:
+                    accomp_rot = accomp_rot / accomp_sum
+                accomp_dist = tuple(float(v) for v in accomp_rot)
+            else:
+                accomp_dist = tuple(0.0 for _ in range(12))
+
+            # --- Valley penalty ---
+            # Count raga notes sitting at a valley in smoothed histogram
+            # unless that note is also a detected peak.
+            detected_peak_pcs = set()
+            # Map detected_peak_count's source pitch classes from the
+            # rotated histogram: peaks in p_rot that are among the top
+            # detected_peak_count values
+            sorted_indices = np.argsort(H_pc_arr)[::-1]
+            for idx in sorted_indices[:detected_peak_count]:
+                detected_peak_pcs.add(int(idx))
+
+            valley_count = 0
+            for note_idx in raga_note_indices:
+                # Absolute pitch class = (note_idx + tonic) % 12
+                abs_pc = (note_idx + tonic) % 12
+                center_bin = int(abs_pc * 100) % 1200
+                center_val = cent_hist_smooth[center_bin]
+                left_val = cent_hist_smooth[(center_bin - 15) % 1200]
+                right_val = cent_hist_smooth[(center_bin + 15) % 1200]
+                is_valley = center_val < left_val and center_val < right_val
+                is_peak = abs_pc in detected_peak_pcs
+                if is_valley and not is_peak:
+                    valley_count += 1
+
+            final_results.append({
+                "raga": ", ".join(names),
+                "tonic": int(tonic),
+                "tonic_name": _tonic_to_name(tonic),
+                "salience": int(tonic_sal),
+                "fit_score": fit_score,
+                "primary_score": float(primary_score),
+                "match_mass": match_mass,
+                "extra_mass": extra_mass,
+                "observed_note_score": observed_note_score,
+                "loglike_norm": loglike_norm,
+                "raga_size": raga_size,
+                "match_diff": size_diff,
+                "complexity_pen": complexity_pen,
+                **{f"melody_dist_{i}": melody_dist[i] for i in range(12)},
+                **{f"accomp_dist_{i}": accomp_dist[i] for i in range(12)},
+                "valley_penalty": valley_count,
+            })
+    
+    df = pd.DataFrame(final_results)
+    
+    if len(df) > 0:
+        # Sort by fit_score -> primary_score -> salience
+        # This matches the notebook behavior (fusion=False mode)
+        df = df.sort_values(
+            by=["fit_score", "primary_score", "salience"],
+            ascending=[False, False, False]
+        ).reset_index(drop=True)
+        df["rank"] = df.index + 1
+    
+    return df
+
+
+# =============================================================================
+# RAGA CORRECTION & FILTERING
+# =============================================================================
+
+def get_raga_notes(raga_db: RagaDatabase, raga_name: str, tonic: Union[int, str]) -> List[int]:
+    """
+    Get the valid notes for a specific raga relative to the given tonic.
+    
+    Args:
+        raga_db: RagaDatabase instance
+        raga_name: Name of the raga (can be comma-separated list, first match used)
+        tonic: Tonic pitch class (0-11) or note name
+        
+    Returns:
+        List of pitch classes (0-11) valid in this raga
+    """
+    candidate_names = [n.strip() for n in raga_name.split(',')]
+    mask_abs = None
+    matched_name = None
+    
+    for name in candidate_names:
+        # 1. Exact match
+        if raga_db.name_to_mask and name.lower() in raga_db.name_to_mask:
+            mask_abs = raga_db.name_to_mask[name.lower()]
+            matched_name = name
+            break
+            
+        # 2. Fuzzy match
+        for r in raga_db.all_ragas:
+            for db_name in r["names"]:
+                # Check if input name is part of DB name, or DB name is part of input name
+                if name.lower() in db_name.lower() or db_name.lower() in name.lower():
+                    mask_abs = r["mask"]
+                    matched_name = db_name
+                    break
+            if mask_abs: break
+        if mask_abs: break
+    
+    if mask_abs is None:
+        print(f"[WARN] Raga '{raga_name}' (or sub-names) not found in DB. Allowing all notes.")
+        return list(range(12))
+    
+    print(f"  [INFO] Found raga match: '{matched_name}'")
+    
+    tonic_pc = _parse_tonic(tonic) if isinstance(tonic, str) else int(tonic)
+    
+    mask_arr = np.array(mask_abs)
+    relative_indices = np.where(mask_arr == 1)[0]
+    
+    # Transpose to actual tonic
+    valid_pcs = [(pc + tonic_pc) % 12 for pc in relative_indices]
+    
+    return sorted(valid_pcs)
+
+
+def snap_to_raga_notes(
+    midi_notes: np.ndarray, 
+    valid_pcs: List[int], 
+    max_distance: float = 1.0, 
+    discard_far: bool = False
+) -> Tuple[np.ndarray, List[dict]]:
+    """
+    Snap MIDI notes to the nearest valid raga notes.
+    """
+    corrected_midi: List[float] = []
+    correction_info: List[dict] = []
+    valid_pcs_sorted = sorted({int(pc) % 12 for pc in valid_pcs})
+
+    if not valid_pcs_sorted:
+        for original_midi in midi_notes:
+            if np.isnan(original_midi):
+                corrected_midi.append(float("nan"))
+                correction_info.append({
+                    'original_midi': float("nan"),
+                    'action': 'discarded'
+                })
+                continue
+            corrected_midi.append(float(original_midi))
+            correction_info.append(
+                {
+                    'original_midi': float(original_midi),
+                    'corrected_midi': float(original_midi),
+                    'distance': 0.0,
+                    'action': 'unchanged_far',
+                    'closest_pc': int(round(float(original_midi))) % 12,
+                }
+            )
+        return np.array(corrected_midi), correction_info
+
+    prev_corrected: Optional[float] = None
+    eps = 1e-9
+
+    for original_midi in midi_notes:
+        if np.isnan(original_midi):
+            corrected_midi.append(float("nan"))
+            correction_info.append({
+                'original_midi': float("nan"),
+                'action': 'discarded'
+            })
+            continue
+
+        original_midi_f = float(original_midi)
+        center_oct = int(round(original_midi_f)) // 12
+
+        candidates: List[Tuple[float, int]] = []
+        for oct_shift in (-1, 0, 1):
+            octave = center_oct + oct_shift
+            for pc in valid_pcs_sorted:
+                candidate_midi = float(octave * 12 + pc)
+                candidates.append((candidate_midi, pc))
+
+        if not candidates:
+            # Defensive fallback; practically unreachable with non-empty valid_pcs_sorted.
+            corrected_midi.append(original_midi_f)
+            correction_info.append(
+                {
+                    'original_midi': original_midi_f,
+                    'corrected_midi': original_midi_f,
+                    'distance': 0.0,
+                    'action': 'unchanged_far',
+                    'closest_pc': int(round(original_midi_f)) % 12,
+                }
+            )
+            continue
+
+        # 1) Primary key: nearest by continuous MIDI distance.
+        dist_candidates = [
+            (abs(candidate_midi - original_midi_f), candidate_midi, pc)
+            for candidate_midi, pc in candidates
+        ]
+        min_dist = min(item[0] for item in dist_candidates)
+        nearest = [item for item in dist_candidates if abs(item[0] - min_dist) <= eps]
+
+        # 2) Tie-breaker: melodic continuity to previous accepted correction.
+        if len(nearest) > 1 and prev_corrected is not None:
+            continuity_dist = [abs(item[1] - prev_corrected) for item in nearest]
+            min_cont = min(continuity_dist)
+            nearest = [
+                item for item in nearest
+                if abs(abs(item[1] - prev_corrected) - min_cont) <= eps
+            ]
+
+        # 3) Final tie-breaker: prefer higher note.
+        best_dist, best_midi, best_pc = max(nearest, key=lambda item: item[1])
+
+        if discard_far and best_dist > max_distance:
+            correction_info.append({
+                'original_midi': original_midi_f,
+                'action': 'discarded'
+            })
+            continue
+
+        if best_dist <= max_distance:
+            action = 'corrected' if best_dist > eps else 'unchanged'
+            corrected_midi.append(best_midi)
+            correction_info.append({
+                'original_midi': original_midi_f,
+                'corrected_midi': best_midi,
+                'distance': float(best_dist),
+                'action': action,
+                'closest_pc': int(best_pc) % 12
+            })
+            prev_corrected = best_midi
+        else:
+            corrected_midi.append(original_midi_f)
+            correction_info.append({
+                'original_midi': original_midi_f,
+                'corrected_midi': original_midi_f,
+                'distance': float(best_dist),
+                'action': 'unchanged_far'
+            })
+            prev_corrected = original_midi_f
+
+    return np.array(corrected_midi), correction_info
+
+
+def apply_raga_correction_to_notes(
+    note_sequence: List['Note'], # Forward ref
+    raga_db: RagaDatabase, 
+    raga_name: str, 
+    tonic: Union[int, str], 
+    max_distance: float = 1.0, 
+    keep_impure: bool = False,
+) -> Tuple[List['Note'], dict, List[dict]]:
+    """
+    Apply raga-based filtering/correction to a sequence of Notes.
+    """
+    valid_pcs = get_raga_notes(raga_db, raga_name, tonic)
+    
+    corrected_sequence: List[Note] = []
+    all_corrections: List[dict] = []
+    
+    # Stats
+    stats: Dict[str, Any] = {
+        'total': len(note_sequence),
+        'unchanged': 0,
+        'corrected': 0,
+        'discarded': 0,
+        'valid_pcs': valid_pcs
+    }
+
+    def _annotate_pitch_trace(
+        note: Note,
+        raw_pitch_midi: float,
+        snapped_pitch_midi: float,
+        corrected_pitch_midi: float,
+    ) -> Note:
+        note.raw_pitch_midi = float(raw_pitch_midi)
+        note.raw_pitch_hz = float(440.0 * (2.0 ** ((float(raw_pitch_midi) - 69.0) / 12.0)))
+        note.snapped_pitch_midi = float(snapped_pitch_midi)
+        note.corrected_pitch_midi = float(corrected_pitch_midi)
+        note.rendered_pitch_midi = float(getattr(note, "pitch_midi", corrected_pitch_midi))
+        return note
+
+    def _note_with_pitch(
+        note: Note,
+        pitch_midi: float,
+        raw_pitch_midi: float,
+        snapped_pitch_midi: float,
+    ) -> Note:
+        pitch_class = int(round(pitch_midi)) % 12
+        try:
+            sargam = midi_to_sargam(pitch_midi, tonic)
+        except Exception:
+            sargam = note.sargam
+        pitch_hz = float(440.0 * (2.0 ** ((float(pitch_midi) - 69.0) / 12.0)))
+        out_note = Note(
+            start=note.start,
+            end=note.end,
+            pitch_midi=pitch_midi,
+            pitch_hz=pitch_hz,
+            confidence=note.confidence,
+            energy=note.energy,
+            sargam=sargam,
+            pitch_class=pitch_class,
+        )
+        return _annotate_pitch_trace(
+            out_note,
+            raw_pitch_midi=raw_pitch_midi,
+            snapped_pitch_midi=snapped_pitch_midi,
+            corrected_pitch_midi=pitch_midi,
+        )
+
+    source_midi_vals: List[float] = []
+    for note in note_sequence:
+        raw_pitch = getattr(note, "raw_pitch_midi", None)
+        if raw_pitch is None or not np.isfinite(raw_pitch):
+            raw_pitch = getattr(note, "pitch_midi", np.nan)
+        source_midi_vals.append(float(raw_pitch))
+
+    midi_vals = np.array(source_midi_vals, dtype=float)
+    _, info_by_note = snap_to_raga_notes(
+        midi_vals,
+        valid_pcs,
+        max_distance,
+        discard_far=not keep_impure
+    )
+    if len(info_by_note) != len(note_sequence):
+        # Defensive fallback: preserve prior strict behavior.
+        info_by_note = [{'original_midi': float("nan"), 'action': 'discarded'} for _ in note_sequence]
+
+    for note, info, raw_midi in zip(note_sequence, info_by_note, source_midi_vals):
+        midi_val = float(raw_midi)
+        snapped_pitch = float(getattr(note, "pitch_midi", midi_val))
+        all_corrections.append(info)
+        
+        action = info['action']
+        
+        if action == 'discarded':
+            stats['discarded'] += 1
+            continue
+
+        if action in ('unchanged', 'unchanged_far'):
+            stats['unchanged'] += 1
+        elif action == 'corrected':
+            stats['corrected'] += 1
+        else:
+            stats['unchanged'] += 1
+
+        corrected_pitch = float(info.get('corrected_midi', snapped_pitch))
+
+        # Always keep the snapped/rounded pitch for accepted notes so
+        # microtonal values do not leak past raga correction.
+        if (
+            not np.isclose(corrected_pitch, snapped_pitch, atol=1e-9)
+            or note.pitch_class != int(round(corrected_pitch)) % 12
+            or not note.sargam
+        ):
+            corrected_sequence.append(
+                _note_with_pitch(
+                    note,
+                    corrected_pitch,
+                    midi_val,
+                    snapped_pitch,
+                )
+            )
+        else:
+            corrected_sequence.append(
+                _annotate_pitch_trace(
+                    note,
+                    raw_pitch_midi=midi_val,
+                    snapped_pitch_midi=snapped_pitch,
+                    corrected_pitch_midi=corrected_pitch,
+                )
+            )
+                 
+    stats['remaining'] = len(corrected_sequence)
+    return corrected_sequence, stats, all_corrections
+
+
+def _tonic_to_name(tonic: int) -> str:
+    names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    return names[tonic % 12]
+
+
+def _parse_tonic(tonic_str: Union[str, int]) -> int:
+    """Parse tonic string (e.g. 'C#', 'Db', '1') to integer 0-11."""
+    # Handle integer input
+    if isinstance(tonic_str, int):
+        return int(tonic_str) % 12
+    
+    if not tonic_str:
+        raise ValueError("Empty tonic string")
+        
+    s = str(tonic_str).strip().upper()
+    
+    # Handle numeric string
+    if s.isdigit():
+        return int(s) % 12
+    
+    # Handle note names
+    note_map = {
+        "C": 0, "B#": 0,
+        "C#": 1, "DB": 1,
+        "D": 2,
+        "D#": 3, "EB": 3,
+        "E": 4, "FB": 4,
+        "F": 5, "E#": 5,
+        "F#": 6, "GB": 6,
+        "G": 7,
+        "G#": 8, "AB": 8,
+        "A": 9,
+        "A#": 10, "BB": 10,
+        "B": 11, "CB": 11,
+        "SA": 0, # Assume Sa is relative 0 if passed, but usually we want absolute
+    }
+    
+    if s in note_map:
+        return note_map[s]
+        
+    raise ValueError(f"Invalid tonic: {tonic_str}")
+
+
+def _parse_tonic_list(tonic_input: Optional[Union[str, List[Union[str, int]], Tuple[Union[str, int], ...]]]) -> List[int]:
+    """Parse a comma-separated tonic list into unique pitch classes."""
+    if tonic_input is None:
+        return []
+
+    if isinstance(tonic_input, (list, tuple, set)):
+        parts = list(tonic_input)
+    else:
+        parts = [part.strip() for part in str(tonic_input).split(",") if part.strip()]
+
+    tonics: List[int] = []
+    seen: Set[int] = set()
+    for part in parts:
+        tonic = _parse_tonic(part)
+        if tonic not in seen:
+            tonics.append(tonic)
+            seen.add(tonic)
+    return tonics
+
+
+class RagaScorer:
+    """
+    Score and rank candidates using either:
+    - Full notebook algorithm (default)
+    - Trained ML model (if provided)
+    """
+    
+    def __init__(
+        self,
+        raga_db: RagaDatabase,
+        model_path: Optional[str] = None,
+        use_ml: bool = False,
+        params: ScoringParams = DEFAULT_SCORING_PARAMS,
+    ):
+        self.raga_db = raga_db
+        self.params = params
+        self.use_ml = use_ml
+        self.model = None
+        self.scaler = None
+        
+        if use_ml and model_path and os.path.isfile(model_path):
+            self._load_model(model_path)
+    
+    def _load_model(self, model_path: str):
+        try:
+            import joblib
+            self.model = joblib.load(model_path)
+            scaler_path = model_path.replace("_model.pkl", "_scaler.pkl")
+            if os.path.isfile(scaler_path):
+                self.scaler = joblib.load(scaler_path)
+            print(f"[SCORER] Loaded ML model: {os.path.basename(model_path)}")
+        except Exception as e:
+            print(f"[SCORER] Failed to load model: {e}")
+            self.model = None
+            self.use_ml = False
+    
+    def score(
+        self,
+        pitch_data_vocals: PitchData,
+        pitch_data_accomp: Optional[PitchData],
+        detected_peak_count: int,
+        instrument_mode: str = "autodetect",
+        tonic_candidates: Optional[List[int]] = None,
+        bias_cents: Optional[float] = None,
+        raga_filter: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        Score all raga candidates.
+        
+        Returns DataFrame sorted by score.
+        """
+        return score_candidates_full(
+            pitch_data_vocals,
+            pitch_data_accomp,
+            self.raga_db,
+            detected_peak_count,
+            instrument_mode,
+            self.params,
+            tonic_candidates,
+            bias_cents,
+            raga_filter,
+        )

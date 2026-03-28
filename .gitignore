@@ -1,5 +1,16 @@
 .local_app_data/
 __pycache__/
 *.pyc
+*.pyc
 .env
+.DS_Store
 node_modules/
+.next/
+
+# Large pipeline artifacts (not needed for the web app)
+raga_pipeline/motif_index.json
+raga_pipeline/motif_report.html
+raga_pipeline/motif_results.json
+raga_pipeline/motif_summary.csv
+raga_pipeline/pretrained_models/
+raga_pipeline/detect_output.txt
