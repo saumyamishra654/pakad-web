@@ -35,8 +35,8 @@ export function SongCard({ song, onDelete }: { song: Song; onDelete?: () => void
             <div className="text-text-faint text-[10px] mt-1">MP3</div>
           </div>
         )}
-        <div className={`absolute top-2 right-2 text-white text-[10px] font-semibold px-2 py-0.5 rounded ${isYoutube ? "bg-red-600" : "bg-accent"}`}>
-          {isYoutube ? "YT" : "File"}
+        <div className={`absolute top-2 right-2 text-white text-[10px] font-semibold px-2 py-0.5 rounded ${isYoutube ? "bg-red-600" : song.source === "recording" ? "bg-emerald-600" : "bg-accent"}`}>
+          {isYoutube ? "YT" : song.source === "recording" ? "Rec" : "File"}
         </div>
         {/* Delete button - visible on hover */}
         <button

@@ -31,8 +31,8 @@ export function SongList({ songs }: { songs: Song[] }) {
             >
               <td className="px-4 py-3 text-text-primary font-medium truncate max-w-[300px]">{song.title}</td>
               <td className="px-4 py-3">
-                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded text-white ${song.source === "youtube" ? "bg-red-600" : "bg-accent"}`}>
-                  {song.source === "youtube" ? "YT" : "File"}
+                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded text-white ${song.source === "youtube" ? "bg-red-600" : song.source === "recording" ? "bg-emerald-600" : "bg-accent"}`}>
+                  {song.source === "youtube" ? "YT" : song.source === "recording" ? "Rec" : "File"}
                 </span>
               </td>
               <td className="px-4 py-3 text-text-muted">

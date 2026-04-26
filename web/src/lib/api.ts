@@ -86,6 +86,15 @@ export async function listRagas() {
   return res.json();
 }
 
+export async function listTanpuraTracks() {
+  const res = await apiFetch("/api/tanpura-tracks");
+  return res.json();
+}
+
+export function tanpuraAudioUrl(key: string): string {
+  return `${API_BASE}/api/tanpura-audio/${encodeURIComponent(key)}`;
+}
+
 export async function toggleVisibility(songId: string) {
   const res = await apiFetch(`/api/songs/${songId}/visibility`, { method: "PATCH" });
   return res.json();

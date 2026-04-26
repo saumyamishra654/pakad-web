@@ -50,61 +50,104 @@ def _find_artifact_dir(audio_hash: str) -> Optional[str]:
     return base
 
 
-def _compute_pitch_histogram(pitch_csv_path: str, num_bins: int = 25, min_confidence: float = 0.5) -> list[dict]:
-    """Compute a pitch class histogram from raw pitch data CSV.
+def _gaussian_smooth(values: list[float], sigma: float = 0.8) -> list[float]:
+    """Apply circular Gaussian smoothing to a 1D list (wraps at octave boundary)."""
+    import math
+    n = len(values)
+    if n == 0:
+        return []
+    radius = max(1, int(3 * sigma))
+    kernel = [math.exp(-0.5 * (x / sigma) ** 2) for x in range(-radius, radius + 1)]
+    k_sum = sum(kernel)
+    kernel = [k / k_sum for k in kernel]
+    result = []
+    for i in range(n):
+        total = 0.0
+        for j, k in enumerate(kernel):
+            idx = (i + j - radius) % n  # circular wrap
+            total += values[idx] * k
+        result.append(total)
+    return result
 
-    Returns a list of {cents, label, weight} dicts. 25 bins across 1200 cents (one octave).
-    Labels use western notation (C, C#, D, etc.).
+
+def _find_pitch_csv(art_dir: str, stem: str) -> Optional[str]:
+    """Find pitch data CSV, trying with and without extractor suffix."""
+    for name in [f"{stem}_pitch_data.csv", f"{stem}_pitch_data_swiftf0.csv"]:
+        path = f"{art_dir}/{name}"
+        if Path(path).exists():
+            return path
+    return None
+
+
+def _compute_dual_histogram(pitch_csv_path: str, min_confidence: float = 0.5, bias_cents: float = 0.0) -> dict:
+    """Compute dual-resolution smoothed histograms from raw pitch data CSV.
+
+    Returns {highRes: [...], lowRes: [...]} with raw and smoothed weights.
+    High-res: 100 bins (12 cents each). Low-res: 33 bins (~36 cents each).
     """
     import math
     NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    empty = {"highRes": [], "lowRes": []}
 
-    if not Path(pitch_csv_path).exists():
-        return []
+    if not pitch_csv_path or not Path(pitch_csv_path).exists():
+        return empty
 
     rows = _read_csv_rows(pitch_csv_path, max_rows=100000)
     if not rows:
-        return []
+        return empty
 
-    # Compute cents (0-1200) from Hz for each voiced frame
     cent_values = []
     for row in rows:
         hz = float(row.get("pitch_hz", 0))
         conf = float(row.get("confidence", 0))
         if hz > 0 and conf >= min_confidence:
             midi = 12 * math.log2(hz / 440) + 69
-            cents = (midi % 12) * 100.0  # 0-1200 range
+            cents = ((midi % 12) * 100.0 - bias_cents) % 1200.0
             cent_values.append(cents)
 
     if not cent_values:
-        return []
+        return empty
 
-    # Build histogram
-    bin_width = 1200.0 / num_bins
-    bins = [0.0] * num_bins
+    # High-res: 100 bins, 12 cents each
+    high_n = 100
+    high_w = 1200.0 / high_n
+    high_hist = [0.0] * high_n
     for c in cent_values:
-        idx = min(int(c / bin_width), num_bins - 1)
-        bins[idx] += 1
+        high_hist[min(int(c / high_w), high_n - 1)] += 1
+    high_total = sum(high_hist) or 1
+    high_hist = [h / high_total for h in high_hist]
+    high_smoothed = _gaussian_smooth(high_hist, sigma=0.8)
 
-    # Normalize to relative weight
-    total = sum(bins)
-    if total > 0:
-        bins = [b / total for b in bins]
+    # Low-res: 33 bins, ~36.4 cents each
+    low_n = 33
+    low_w = 1200.0 / low_n
+    low_hist = [0.0] * low_n
+    for c in cent_values:
+        low_hist[min(int(c / low_w), low_n - 1)] += 1
+    low_total = sum(low_hist) or 1
+    low_hist = [l / low_total for l in low_hist]
+    low_smoothed = _gaussian_smooth(low_hist, sigma=0.8)
 
-    # Build result with western note labels
-    result = []
-    for i in range(num_bins):
-        center_cents = (i + 0.5) * bin_width
-        # Map center_cents to nearest western note
-        note_idx = int(round(center_cents / 100)) % 12
-        label = NOTE_NAMES[note_idx]
-        # Add cents offset if not near a note center
-        offset = center_cents - (note_idx * 100)
-        if abs(offset) > 20:
-            label = f"{label}{'+' if offset > 0 else ''}{int(offset)}c"
-        result.append({"cents": center_cents, "label": label, "weight": bins[i]})
+    high_res = []
+    for i in range(high_n):
+        high_res.append({
+            "cents": round((i + 0.5) * high_w, 1),
+            "weight": round(high_hist[i], 6),
+            "smoothed": round(high_smoothed[i], 6),
+        })
 
-    return result
+    low_res = []
+    for i in range(low_n):
+        center = (i + 0.5) * low_w
+        note_idx = int(round(center / 100)) % 12
+        low_res.append({
+            "cents": round(center, 1),
+            "weight": round(low_hist[i], 6),
+            "smoothed": round(low_smoothed[i], 6),
+            "label": NOTE_NAMES[note_idx],
+        })
+
+    return {"highRes": high_res, "lowRes": low_res}
 
 
 def _get_raga_info(raga_name: str) -> dict:
@@ -126,15 +169,20 @@ def _get_raga_info(raga_name: str) -> dict:
     return {"name": raga_name}
 
 
+_SARGAM_ORDER = {
+    'Sa': 0, 're': 1, 'Re': 2, 'ga': 3, 'Ga': 4,
+    'ma': 5, 'Ma': 6, 'Pa': 7, 'dha': 8, 'Dha': 9,
+    'ni': 10, 'Ni': 11,
+}
+
 def _compute_transition_matrix(transcription: list[dict]) -> dict:
     """Build a note-to-note transition count matrix from transcription rows."""
-    sargam_notes = sorted(
-        set(
-            n["sargam"].rstrip("\u00b7").rstrip("'").rstrip(",")
-            for n in transcription
-            if n.get("sargam")
-        )
+    unique = set(
+        n["sargam"].rstrip("\u00b7").rstrip("'").rstrip(",")
+        for n in transcription
+        if n.get("sargam")
     )
+    sargam_notes = sorted(unique, key=lambda s: _SARGAM_ORDER.get(s, 99))
     if not sargam_notes:
         return {"notes": [], "matrix": []}
     matrix = [[0] * len(sargam_notes) for _ in range(len(sargam_notes))]
@@ -169,16 +217,34 @@ async def get_results(
     detected = detect_meta.get("detected", {})
     analysis_meta = _read_json(f"{art_dir}/analysis_report.meta.json") or {}
 
-    # -- Candidates --
+    # -- Histogram candidates (always from candidates.csv) --
+    histogram_candidates = []
     candidates_raw = _read_csv_rows(f"{art_dir}/candidates.csv")
-    candidates = []
     for row in candidates_raw[:20]:
-        candidates.append({
+        histogram_candidates.append({
             "raga": row.get("raga", ""),
             "tonic": row.get("tonic_name", ""),
             "score": float(row.get("fit_score", 0)),
             "rank": int(row.get("rank", 0)),
         })
+
+    # -- LM-reranked candidates (combined histogram + LM scoring) --
+    candidates = []
+    lm_candidates_raw = _read_csv_rows(f"{art_dir}/lm_candidates.csv")
+    if lm_candidates_raw:
+        for row in lm_candidates_raw:
+            score = float(row.get("combined_score", -999))
+            if score <= -900:
+                continue
+            candidates.append({
+                "raga": row.get("raga", ""),
+                "tonic": row.get("tonic_name", ""),
+                "score": round(score, 4),
+                "rank": int(row.get("lm_rank", 0)),
+            })
+        candidates = candidates[:20]
+    else:
+        candidates = histogram_candidates
 
     # -- Transcription --
     notes_raw = _read_csv_rows(f"{art_dir}/transcribed_notes.csv")
@@ -196,8 +262,8 @@ async def get_results(
 
     # -- Raga info from database --
     raga_name = (
-        detected.get("top_raga")
-        or detected.get("selected_raga")
+        detected.get("selected_raga")
+        or detected.get("top_raga")
         or ""
     )
     raga_info = _get_raga_info(raga_name)
@@ -221,11 +287,22 @@ async def get_results(
         if Path(f"{art_dir}/{stem_name}.mp3").exists():
             stems[stem_name] = f"/api/results/{song_id}/audio/{stem_name}.mp3"
 
-    # -- Pitch histograms (25-bin, from raw pitch data) --
-    vocals_histogram = _compute_pitch_histogram(f"{art_dir}/vocals_pitch_data.csv")
-    accompaniment_histogram = _compute_pitch_histogram(f"{art_dir}/accompaniment_pitch_data.csv")
-    # Keep the old 12-bin for backward compat
-    histogram = vocals_histogram
+    # -- Original audio (file uploads only, not YouTube) --
+    if song.get("source") != "youtube":
+        uploaded_by = song.get("uploadedBy", "")
+        upload_base = storage.upload_dir(uploaded_by, song_id)
+        for ext in ["*.mp3", "*.wav", "*.flac", "*.m4a"]:
+            original_files = storage.list_files(upload_base, ext)
+            if original_files:
+                stems["original"] = f"/api/results/{song_id}/audio/original"
+                break
+
+    # -- Pitch histograms (dual-resolution, smoothed, bias-corrected) --
+    bias_cents = detected.get("gmm_bias_cents") or 0.0
+    vocals_csv = _find_pitch_csv(art_dir, "vocals")
+    accomp_csv = _find_pitch_csv(art_dir, "accompaniment")
+    vocals_histogram = _compute_dual_histogram(vocals_csv, bias_cents=bias_cents)
+    accompaniment_histogram = _compute_dual_histogram(accomp_csv, bias_cents=bias_cents)
 
     # -- Transition matrix --
     transition_matrix = _compute_transition_matrix(transcription)
@@ -246,17 +323,17 @@ async def get_results(
             "visibility": song.get("visibility", "private"),
         },
         "detection": {
-            "raga": detected.get("top_raga"),
+            "raga": detected.get("selected_raga") or detected.get("top_raga"),
             "tonic": detected.get("top_tonic_name"),
-            "tonicMidi": detected.get("top_tonic"),
+            "tonicMidi": detected.get("selected_tonic") or detected.get("top_tonic"),
             "confidence": detected.get("confidence"),
         },
         "ragaInfo": raga_info,
         "candidates": candidates,
+        "histogramCandidates": histogram_candidates,
         "transcription": transcription,
         "images": images,
         "stems": stems,
-        "histogram": histogram,
         "vocalsHistogram": vocals_histogram,
         "accompanimentHistogram": accompaniment_histogram,
         "transitionMatrix": transition_matrix,
@@ -271,12 +348,26 @@ async def get_audio_file(
     filename: str,
     user: Optional[dict] = Depends(get_optional_user),
 ):
-    """Serve a stem audio file (e.g. vocals.mp3, accompaniment.mp3)."""
+    """Serve a stem audio file (e.g. vocals.mp3, accompaniment.mp3, or original)."""
     from fastapi.responses import FileResponse
 
     song = firestore_client.get_song(song_id)
     if not song:
         raise HTTPException(status_code=404, detail="Song not found")
+
+    # Handle "original" — serve from uploads dir
+    if filename == "original":
+        uploaded_by = song.get("uploadedBy", "")
+        upload_base = storage.upload_dir(uploaded_by, song_id)
+        for ext in ["*.mp3", "*.wav", "*.flac", "*.m4a"]:
+            files = storage.list_files(upload_base, ext)
+            if files:
+                return FileResponse(
+                    str(storage.get_absolute_path(files[0])),
+                    media_type="audio/mpeg",
+                )
+        raise HTTPException(status_code=404, detail="Original audio not found")
+
     audio_hash = song.get("audioHash", "")
     art_dir = _find_artifact_dir(audio_hash)
     filepath = f"{art_dir}/{filename}"
@@ -317,8 +408,10 @@ async def get_pitch_data(
         raise HTTPException(status_code=404, detail="Song not found")
     audio_hash = song.get("audioHash", "")
     art_dir = _find_artifact_dir(audio_hash)
-    csv_file = f"{art_dir}/{stem}_pitch_data.csv"
-    if not Path(csv_file).exists():
+    # Map "original" to "composite" pitch data
+    csv_stem = "composite" if stem == "original" else stem
+    csv_file = _find_pitch_csv(art_dir, csv_stem)
+    if not csv_file:
         raise HTTPException(
             status_code=404,
             detail=f"Pitch data not found for stem: {stem}",

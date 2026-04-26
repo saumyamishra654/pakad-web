@@ -140,6 +140,14 @@ class PipelineConfig:
     use_ml_model: bool = False  # Disabled per migration plan
     model_path: Optional[str] = None      # Path to trained model (unused)
 
+    # LM scoring (detect mode)
+    use_lm_scoring: bool = True
+    lm_model_path: Optional[str] = None
+    lm_skip_correction: bool = True
+    lm_deletion_lambda: float = 2.0
+    lm_deletion_slope: float = -0.0684
+    lm_deletion_intercept: float = 0.6640
+
     # db paths
     raga_db_path: Optional[str] = None    # Auto-locates if None
 
@@ -163,6 +171,7 @@ class PipelineConfig:
     keep_impure_notes: bool = False
     strict_raga_35c_filter: bool = False
     strict_raga_max_cents: float = 35.0
+    skip_raga_correction: bool = False
 
     def __post_init__(self):
         """Validate and normalize paths."""
@@ -234,6 +243,13 @@ class PipelineConfig:
         if self.mode == "detect" and self.force_stem_recompute and not self.force_recompute:
             raise ValueError("Detect mode with --force-stems requires --force.")
 
+        if self.use_lm_scoring and not self.lm_model_path:
+            self.lm_model_path = self._find_lm_model_path()
+        if self.use_lm_scoring and not self.lm_model_path:
+            raise ValueError("--use-lm-scoring requires --lm-model (path to trained n-gram model JSON)")
+        if self.use_lm_scoring and self.lm_model_path and not os.path.exists(self.lm_model_path):
+            raise ValueError(f"--lm-model path does not exist: {self.lm_model_path}")
+
         if self.mode == "detect" and self.skip_separation:
             tonic_tokens = [
                 token.strip()
@@ -262,6 +278,20 @@ class PipelineConfig:
             package_dir / "models" / "raga_mlp_model.pkl",
             package_dir / "raga_mlp_model.pkl",
             package_dir.parent / "raga_mlp_model.pkl",
+        ]
+        for path in candidates:
+            if path.exists():
+                return str(path)
+        return None
+
+    def _find_lm_model_path(self) -> Optional[str]:
+        """Find trained n-gram LM in standard locations."""
+        project_root = Path(__file__).parent.parent
+        candidates = [
+            project_root / "raga_pipeline" / "models" / "compmusic_ngram_model.json",
+            project_root / "compmusic_ngram_model_uncorrected.json",
+            project_root / "raga_pipeline" / "models" / "compmusic_ngram_model_uncorrected.json",
+            project_root / "compmusic_ngram_model.json",
         ]
         for path in candidates:
             if path.exists():
@@ -511,12 +541,27 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Detect mode only: requires --force and also forces stem-separation recomputation.",
     )
+    detect_parser.add_argument("--use-lm-scoring", action=argparse.BooleanOptionalAction, default=True,
+                               help="Re-rank candidates using n-gram language model (default: on; --no-use-lm-scoring to disable)")
+    detect_parser.add_argument("--lm-model", dest="lm_model_path", default=None,
+                               help="Path to trained n-gram model JSON (auto-discovered if omitted)")
+    detect_parser.add_argument("--lm-skip-correction", action=argparse.BooleanOptionalAction, default=True,
+                               help="Score uncorrected chromatic transcription (default: on; "
+                                    "--no-lm-skip-correction for per-raga correction mode)")
+    detect_parser.add_argument("--lm-deletion-lambda", type=float, default=2.0,
+                               help="Weight for deletion residual in combined LM scoring (default: 2.0)")
+    detect_parser.add_argument("--lm-deletion-slope", type=float, default=-0.0684,
+                               help="Regression slope for expected deletion vs scale size (default: -0.0684)")
+    detect_parser.add_argument("--lm-deletion-intercept", type=float, default=0.6640,
+                               help="Regression intercept for expected deletion vs scale size (default: 0.6640)")
 
     # --- Analyze Mode ---
     analyze_parser = subparsers.add_parser("analyze", help="Phase 2: Analysis only")
     _add_common_args(analyze_parser, required=True)
     analyze_parser.add_argument("--tonic", required=True, help="Tonic (e.g. C, D#)")
     analyze_parser.add_argument("--raga", required=True, help="Raga name")
+    analyze_parser.add_argument("--skip-raga-correction", action="store_true",
+                                   help="Skip post-transcription raga correction (keep chromatic transcription as-is)")
     analyze_parser.add_argument("--keep-impure-notes", action="store_true", help="Keep notes not in raga (default: remove)")
     analyze_parser.add_argument(
         "--strict-raga-35c-filter",
@@ -695,9 +740,16 @@ def _config_from_parsed_args(args: argparse.Namespace, parser: argparse.Argument
         pitch_only=getattr(args, 'pitch_only', False),
         transcription_only=getattr(args, 'transcription_only', False),
         raga_db_path=getattr(args, 'raga_db', None),
+        use_lm_scoring=getattr(args, 'use_lm_scoring', True),
+        lm_model_path=getattr(args, 'lm_model_path', None),
+        lm_skip_correction=getattr(args, 'lm_skip_correction', True),
+        lm_deletion_lambda=getattr(args, 'lm_deletion_lambda', 2.0),
+        lm_deletion_slope=getattr(args, 'lm_deletion_slope', -0.0684),
+        lm_deletion_intercept=getattr(args, 'lm_deletion_intercept', 0.6640),
         mode=mode,
         tonic_override=getattr(args, 'tonic', None),
         raga_override=getattr(args, 'raga', None),
+        skip_raga_correction=getattr(args, 'skip_raga_correction', False),
         keep_impure_notes=getattr(args, 'keep_impure_notes', False),
         strict_raga_35c_filter=getattr(args, 'strict_raga_35c_filter', False),
         strict_raga_max_cents=getattr(args, 'strict_raga_max_cents', 35.0),

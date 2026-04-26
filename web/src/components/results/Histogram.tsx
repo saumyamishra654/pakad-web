@@ -1,57 +1,171 @@
 "use client";
 
-interface HistogramBar {
-  cents?: number;
-  pitchClass?: number;
-  label?: string;
-  sargam?: string;
-  weight: number;
+interface DualHistogramData {
+  highRes: { cents: number; weight: number; smoothed: number }[];
+  lowRes: { cents: number; weight: number; smoothed: number; label: string }[];
 }
 
-export function Histogram({ data, title }: { data: HistogramBar[]; title: string }) {
-  if (data.length === 0) return null;
+const COLORS = {
+  amber: {
+    bar: "rgba(191, 110, 19, 0.25)",
+    curve: "#bf6e13",
+    fill: "rgba(191, 110, 19, 0.07)",
+  },
+  teal: {
+    bar: "rgba(61, 139, 120, 0.25)",
+    curve: "#3d8b78",
+    fill: "rgba(61, 139, 120, 0.07)",
+  },
+};
 
-  const maxWeight = Math.max(...data.map((d) => d.weight));
-  if (maxWeight === 0) return null;
+const NOTE_LABELS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+export function Histogram({
+  data,
+  title,
+  color = "amber",
+}: {
+  data: DualHistogramData;
+  title: string;
+  color?: "amber" | "teal";
+}) {
+  if (!data || (!data.highRes?.length && !data.lowRes?.length)) return null;
+
+  const palette = COLORS[color];
+
+  const W = 580;
+  const H = 190;
+  const pad = { top: 12, right: 12, bottom: 30, left: 12 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  // Find max across both resolutions for consistent scale
+  const maxHigh = data.highRes.length > 0
+    ? Math.max(...data.highRes.map((d) => d.smoothed))
+    : 0;
+  const maxLow = data.lowRes.length > 0
+    ? Math.max(...data.lowRes.map((d) => d.weight))
+    : 0;
+  const maxVal = Math.max(maxHigh, maxLow, 0.001);
+
+  const xScale = (cents: number) => pad.left + (cents / 1200) * plotW;
+  const yScale = (val: number) => pad.top + plotH * (1 - val / maxVal);
+
+  // Low-res bar width
+  const barW = data.lowRes.length > 0 ? plotW / data.lowRes.length : 0;
+
+  // High-res smoothed curve as SVG path
+  let curveLine = "";
+  let areaPath = "";
+  if (data.highRes.length > 0) {
+    const points = data.highRes.map(
+      (d) => `${xScale(d.cents).toFixed(1)},${yScale(d.smoothed).toFixed(1)}`
+    );
+    curveLine = `M ${points.join(" L ")}`;
+    const lastX = xScale(data.highRes[data.highRes.length - 1].cents).toFixed(1);
+    const firstX = xScale(data.highRes[0].cents).toFixed(1);
+    const baseline = yScale(0).toFixed(1);
+    areaPath = `${curveLine} L ${lastX},${baseline} L ${firstX},${baseline} Z`;
+  }
 
   return (
     <div className="bg-bg-card border border-border rounded-xl overflow-hidden">
-      <div className="px-4 py-2.5 border-b border-border">
+      <div className="px-4 py-2.5 border-b border-border flex items-center justify-between">
         <span className="text-text-secondary text-xs font-medium">{title}</span>
+        <div className="flex items-center gap-3 text-[9px] text-text-faint">
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block w-3 h-2.5 rounded-sm"
+              style={{ backgroundColor: palette.bar }}
+            />
+            33-bin
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block w-4 h-px"
+              style={{ backgroundColor: palette.curve }}
+            />
+            100-bin smoothed
+          </span>
+        </div>
       </div>
       <div className="p-4">
-        <div className="flex items-end justify-center gap-px" style={{ height: "180px" }}>
-          {data.map((bar, i) => {
-            const height = maxWeight > 0 ? (bar.weight / maxWeight) * 160 : 0;
-            const intensity = 0.3 + (bar.weight / maxWeight) * 0.7;
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          className="w-full"
+          preserveAspectRatio="xMidYMid meet"
+        >
+          {/* Subtle horizontal grid lines */}
+          {[0.25, 0.5, 0.75].map((frac) => (
+            <line
+              key={frac}
+              x1={pad.left}
+              x2={W - pad.right}
+              y1={pad.top + plotH * (1 - frac)}
+              y2={pad.top + plotH * (1 - frac)}
+              stroke="currentColor"
+              className="text-border"
+              strokeWidth={0.5}
+              strokeDasharray="3 4"
+            />
+          ))}
+
+          {/* Low-res bars (raw weight) */}
+          {data.lowRes.map((d, i) => {
+            const h = (d.weight / maxVal) * plotH;
+            if (h < 0.5) return null;
             return (
-              <div key={i} className="flex flex-col items-center" style={{ flex: "1 1 0", maxWidth: 32 }}>
-                <div
-                  className="w-full rounded-t-sm"
-                  style={{
-                    height: `${height}px`,
-                    backgroundColor: `rgba(191, 110, 19, ${intensity})`,
-                  }}
-                  title={`${bar.label || bar.sargam || bar.pitchClass}: ${(bar.weight * 100).toFixed(1)}%`}
-                />
-              </div>
+              <rect
+                key={i}
+                x={xScale(d.cents) - barW * 0.4}
+                y={yScale(d.weight)}
+                width={barW * 0.8}
+                height={h}
+                fill={palette.bar}
+                rx={1}
+              />
             );
           })}
-        </div>
-        <div className="flex justify-center gap-px mt-1.5">
-          {data.map((bar, i) => {
-            const showLabel = data.length <= 12 || i % 2 === 0;
-            return (
-              <div key={i} className="text-center" style={{ flex: "1 1 0", maxWidth: 32 }}>
-                {showLabel && (
-                  <span className="text-text-faint text-[8px] font-mono leading-none">
-                    {bar.label || bar.sargam || ""}
-                  </span>
-                )}
-              </div>
-            );
-          })}
-        </div>
+
+          {/* High-res smoothed area fill */}
+          {areaPath && <path d={areaPath} fill={palette.fill} />}
+
+          {/* High-res smoothed curve line */}
+          {curveLine && (
+            <path
+              d={curveLine}
+              fill="none"
+              stroke={palette.curve}
+              strokeWidth={1.5}
+              opacity={0.85}
+            />
+          )}
+
+          {/* Baseline */}
+          <line
+            x1={pad.left}
+            x2={W - pad.right}
+            y1={yScale(0)}
+            y2={yScale(0)}
+            stroke="currentColor"
+            className="text-border"
+            strokeWidth={0.5}
+          />
+
+          {/* X-axis note labels at semitone centers */}
+          {NOTE_LABELS.map((label, i) => (
+            <text
+              key={label}
+              x={xScale(i * 100 + 50)}
+              y={H - 6}
+              textAnchor="middle"
+              fill="var(--color-text-faint)"
+              style={{ fontSize: "9px", fontFamily: "ui-monospace, monospace" }}
+            >
+              {label}
+            </text>
+          ))}
+        </svg>
       </div>
     </div>
   );

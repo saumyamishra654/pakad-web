@@ -56,36 +56,44 @@ def _run_pipeline(job: Job) -> None:
     source = song.get("source", "file")
     _log(job.id, f"Song: \"{title}\" | source={source} | hash={audio_hash}")
 
+    # Fetch analysis params early (needed for YouTube trimming)
+    analysis = firestore_client.get_analysis(job.song_id, job.analysis_id)
+    params = analysis.get("params", {}) if analysis else {}
+
     # Determine audio file path
     if source == "youtube":
         video_id = song.get("youtubeVideoId")
         if not video_id:
             raise ValueError("No YouTube video ID")
         tmp = storage.ensure_dir(storage.tmp_dir(job.id))
-        audio_path = str(tmp / "audio.mp3")
-        _log(job.id, f"[1/4 YouTube Download] Downloading video {video_id}...")
+        yt_url = f"https://youtube.com/watch?v={video_id}"
+        start_time = params.get("start_time")
+        end_time = params.get("end_time")
+        _log(job.id, f"[1/4 YouTube Download] Downloading video {video_id} (start={start_time}, end={end_time})...")
         _update_job(job.id, status="running", progress=0.05)
-        dl_result = subprocess.run(
-            ["yt-dlp", "-x", "--audio-format", "mp3", "-o", audio_path,
-             f"https://youtube.com/watch?v={video_id}"],
-            capture_output=True, text=True, timeout=300,
-        )
-        if dl_result.returncode != 0:
-            _log(job.id, f"[1/4 YouTube Download] FAILED: {dl_result.stderr[:500]}")
-            raise RuntimeError(f"YouTube download failed: {dl_result.stderr[:500]}")
+        from raga_pipeline.audio import download_youtube_audio
+        try:
+            audio_path = download_youtube_audio(
+                yt_url=yt_url,
+                audio_dir=str(tmp),
+                filename_base="audio",
+                start_time=start_time,
+                end_time=end_time,
+            )
+        except Exception as e:
+            _log(job.id, f"[1/4 YouTube Download] FAILED: {e}")
+            raise RuntimeError(f"YouTube download failed: {e}")
         _log(job.id, f"[1/4 YouTube Download] Complete -> {audio_path}")
     else:
         upload_base = storage.upload_dir(job.user_id, job.song_id)
         files = []
-        for ext in ["*.mp3", "*.wav", "*.flac", "*.m4a"]:
+        for ext in ["*.mp3", "*.wav", "*.flac", "*.m4a", "*.webm", "*.ogg", "*.mp4"]:
             files.extend(storage.list_files(upload_base, ext))
         if not files:
             raise ValueError("No audio file found for this song")
         audio_path = str(storage.get_absolute_path(files[0]))
         _log(job.id, f"[1/4 Audio Source] Using uploaded file: {audio_path}")
 
-    analysis = firestore_client.get_analysis(job.song_id, job.analysis_id)
-    params = analysis.get("params", {}) if analysis else {}
     _log(job.id, f"Analysis params: tonic={params.get('tonic', 'auto')}, raga={params.get('raga', 'auto')}, instrument={params.get('instrument', 'vocal')}")
 
     artifact_base = str(storage.ensure_dir(storage.artifact_dir(audio_hash)))
@@ -109,7 +117,7 @@ def _run_pipeline(job: Job) -> None:
         cmd += ["--vocalist-gender", params["vocalistGender"]]
 
     # Pass all additional advanced params as CLI flags
-    HANDLED_PARAMS = {"tonic", "raga", "instrument", "vocalistGender", "vocalist_gender"}
+    HANDLED_PARAMS = {"tonic", "raga", "instrument", "vocalistGender", "vocalist_gender", "start_time", "end_time"}
     for key, value in params.items():
         if key in HANDLED_PARAMS or value is None or value == "":
             continue
@@ -147,10 +155,10 @@ def _run_pipeline(job: Job) -> None:
             meta = json.load(f)
         det = meta.get("detected", {})
         _log(job.id, f"[2/4 Detect] Meta detected: {json.dumps(det)}")
-        if not detected_tonic and det.get("top_tonic_name"):
-            detected_tonic = det["top_tonic_name"]
-        if not detected_raga and det.get("top_raga"):
-            detected_raga = det["top_raga"]
+        if not detected_tonic:
+            detected_tonic = det.get("top_tonic_name")
+        if not detected_raga:
+            detected_raga = det.get("selected_raga") or det.get("top_raga")
     _log(job.id, f"[2/4 Detect] Resolved tonic={detected_tonic}, raga={detected_raga}")
 
     # If no tonic/raga detected, we can't run analyze

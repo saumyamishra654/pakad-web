@@ -48,6 +48,7 @@ from raga_pipeline.raga import (
     _parse_tonic,
     _parse_tonic_list,
     apply_raga_correction_to_notes,
+    get_raga_notes,
     get_tonic_candidates,
     build_aaroh_avroh_subset,
     load_aaroh_avroh_patterns,
@@ -150,7 +151,9 @@ def _transcribe_for_extractor(
 
     # Raga correction
     correction_summary = {}
-    if raga_db and results.detected_raga:
+    if config.skip_raga_correction:
+        notes = raw_notes
+    elif raga_db and results.detected_raga:
         strict_raga_max_cents = max(float(getattr(config, "strict_raga_max_cents", 35.0)), 0.0)
         raga_max_distance = (strict_raga_max_cents / 100.0) if config.strict_raga_35c_filter else 1.0
         keep_impure = config.keep_impure_notes
@@ -913,6 +916,200 @@ def run_pipeline(
             print("  [WARN] Raga database not found, skipping matching")
         _print_timing("Step 4-5/7 raga matching", perf_counter() - step45_start, audio_duration_s)
 
+        # --- STEP 5.5: LM RE-RANKING (optional) ---
+        if config.use_lm_scoring and config.mode == "detect" and results.candidates is not None and len(results.candidates) > 0:
+            step55_start = perf_counter()
+            print("\n[STEP 5.5/7] LM re-ranking...")
+
+            import json as _json
+            from raga_pipeline.language_model import NgramModel
+            from raga_pipeline.sequence import tokenize_notes_for_lm
+
+            # Load LM
+            lm_path = config.lm_model_path
+            if not lm_path or not os.path.exists(lm_path):
+                print(f"  [ERROR] --lm-model not found: {lm_path}")
+            else:
+                with open(lm_path, "r", encoding="utf-8") as _fh:
+                    lm_model = NgramModel.from_dict(_json.load(_fh))
+                lm_raga_set = set(lm_model.ragas())
+                print(f"  Loaded LM: {len(lm_raga_set)} ragas, order {lm_model.order}")
+
+                # Run chromatic transcription on melody pitch data
+                pitch_data = results.pitch_data_vocals
+                raw_notes = transcription.transcribe_to_notes(
+                    pitch_hz=pitch_data.pitch_hz,
+                    timestamps=pitch_data.timestamps,
+                    voicing_mask=pitch_data.voiced_mask,
+                    tonic=results.detected_tonic or 0,
+                    energy=pitch_data.energy,
+                    energy_threshold=config.energy_threshold,
+                    smoothing_sigma_ms=config.transcription_smoothing_ms,
+                    min_event_duration=config.transcription_min_duration,
+                    derivative_threshold=config.transcription_derivative_threshold,
+                    snap_mode='chromatic',
+                    transcription_min_duration=config.transcription_min_duration,
+                    bias_cents=results.gmm_bias_cents or 0.0,
+                )
+                print(f"  Chromatic transcription: {len(raw_notes)} notes")
+
+                # Get unique tonics from candidates
+                unique_tonics = sorted(results.candidates["tonic"].unique())
+
+                # Merge raw notes (match training pipeline post-processing)
+                merged_notes = merge_consecutive_notes(
+                    raw_notes, max_gap=0.1, pitch_tolerance=0.7,
+                    max_dropout_gap=0.18, dropout_fragment_duration=0.12,
+                )
+
+                # Build candidate list: split comma-grouped raga names
+                lm_rows = []
+
+                if config.lm_skip_correction:
+                    # OPTION A: No per-raga correction. Tokenize once per
+                    # tonic, score against every raga in the LM. Much faster.
+                    tonic_phrases_cache: Dict[int, list] = {}
+                    for tonic_pc in unique_tonics:
+                        tonic_midi = 60.0 + tonic_pc
+                        tonic_phrases_cache[tonic_pc] = tokenize_notes_for_lm(merged_notes, tonic_midi)
+
+                    for _, cand_row in results.candidates.iterrows():
+                        cand_tonic = int(cand_row["tonic"])
+                        raga_group = str(cand_row["raga"])
+                        hist_score = float(cand_row.get("fit_score", cand_row.get("score", 0.0)))
+                        individual_ragas = [r.strip() for r in raga_group.split(",") if r.strip()]
+                        # Filter to ragas the LM knows
+                        individual_ragas = [r for r in individual_ragas if r in lm_raga_set]
+                        phrases = tonic_phrases_cache.get(cand_tonic, [])
+
+                        for cand_raga in individual_ragas:
+                            lm_score = lm_model.score_sequence(cand_raga, phrases) if phrases else -999.0
+                            lm_rows.append({
+                                "tonic": cand_tonic,
+                                "tonic_name": cand_row.get("tonic_name", _tonic_name(cand_tonic)),
+                                "raga": cand_raga,
+                                "histogram_score": round(hist_score, 4),
+                                "lm_score": round(lm_score, 4),
+                                "deletion_rate": 0.0,
+                                "scale_size": 0,
+                                "expected_deletion": 0.0,
+                                "del_residual": 0.0,
+                                "notes_before_correction": len(merged_notes),
+                                "notes_after_correction": len(merged_notes),
+                            })
+                else:
+                    # OPTION B / original: Per-raga correction + scoring.
+                    for _, cand_row in results.candidates.iterrows():
+                        cand_tonic = int(cand_row["tonic"])
+                        raga_group = str(cand_row["raga"])
+                        hist_score = float(cand_row.get("fit_score", cand_row.get("score", 0.0)))
+                        individual_ragas = [r.strip() for r in raga_group.split(",") if r.strip()]
+                        # Filter to ragas the LM knows
+                        individual_ragas = [r for r in individual_ragas if r in lm_raga_set]
+
+                        for cand_raga in individual_ragas:
+                            try:
+                                corrected_notes, corr_stats, _ = apply_raga_correction_to_notes(
+                                    raw_notes, raga_db, cand_raga, cand_tonic,
+                                    max_distance=1.0, keep_impure=False,
+                                )
+                            except Exception:
+                                continue
+                            total = corr_stats.get("total", len(raw_notes))
+                            discarded = corr_stats.get("discarded", 0)
+                            deletion_rate = discarded / total if total > 0 else 1.0
+
+                            scale_size = len(get_raga_notes(raga_db, cand_raga, cand_tonic))
+                            expected_del = config.lm_deletion_slope * scale_size + config.lm_deletion_intercept
+                            del_residual = deletion_rate - expected_del
+
+                            corrected_merged = merge_consecutive_notes(
+                                corrected_notes, max_gap=0.1, pitch_tolerance=0.7,
+                                max_dropout_gap=0.18, dropout_fragment_duration=0.12,
+                            )
+                            tonic_midi = 60.0 + cand_tonic
+                            phrases = tokenize_notes_for_lm(corrected_merged, tonic_midi)
+                            lm_score = lm_model.score_sequence(cand_raga, phrases) if phrases else -999.0
+
+                            lm_rows.append({
+                                "tonic": cand_tonic,
+                                "tonic_name": cand_row.get("tonic_name", _tonic_name(cand_tonic)),
+                                "raga": cand_raga,
+                                "histogram_score": round(hist_score, 4),
+                                "lm_score": round(lm_score, 4),
+                                "deletion_rate": round(deletion_rate, 4),
+                                "scale_size": scale_size,
+                                "expected_deletion": round(expected_del, 4),
+                                "del_residual": round(del_residual, 4),
+                                "notes_before_correction": total,
+                                "notes_after_correction": total - discarded,
+                            })
+
+                # Histogram gate: keep candidates with positive histogram score.
+                # If none pass, keep top 20 by histogram score as fallback.
+                gated = [r for r in lm_rows if r["histogram_score"] > 0]
+                if not gated:
+                    gated = sorted(lm_rows, key=lambda r: r["histogram_score"], reverse=True)[:20]
+                gated_ragas = {(r["tonic"], r["raga"]) for r in gated}
+
+                # Normalize histogram scores within gated candidates to [0, 1].
+                gated_hist = [r["histogram_score"] for r in gated]
+                hist_min = min(gated_hist) if gated_hist else 0.0
+                hist_max = max(gated_hist) if gated_hist else 1.0
+                hist_range = hist_max - hist_min if hist_max > hist_min else 1.0
+
+                # Normalize LM scores within gated candidates to [0, 1].
+                gated_lm = [r["lm_score"] for r in lm_rows
+                            if (r["tonic"], r["raga"]) in gated_ragas and r["lm_score"] > -900]
+                lm_min = min(gated_lm) if gated_lm else 0.0
+                lm_max = max(gated_lm) if gated_lm else 1.0
+                lm_range = lm_max - lm_min if lm_max > lm_min else 1.0
+
+                # Combined score:
+                #   alpha * norm(histogram) + beta * norm(lm) - gamma * del_residual
+                # Defaults: alpha=1.0, beta=1.0, gamma=2.0 (lambda)
+                # norm(histogram) and norm(lm) are in [0,1]; del_residual is ~[-0.2, +0.2]
+                lam = config.lm_deletion_lambda
+                alpha = 0.5  # histogram weight
+                beta = 2.0   # LM weight
+                for row in lm_rows:
+                    is_gated = (row["tonic"], row["raga"]) in gated_ragas
+                    row["gated"] = is_gated
+                    if is_gated:
+                        norm_hist = (row["histogram_score"] - hist_min) / hist_range
+                        norm_lm = (row["lm_score"] - lm_min) / lm_range
+                        row["norm_histogram"] = round(norm_hist, 4)
+                        row["norm_lm"] = round(norm_lm, 4)
+                        row["combined_score"] = round(
+                            alpha * norm_hist + beta * norm_lm - lam * row["del_residual"], 4
+                        )
+                    else:
+                        row["norm_histogram"] = 0.0
+                        row["norm_lm"] = 0.0
+                        row["combined_score"] = -999.0
+
+                # Sort by combined_score descending, assign ranks
+                lm_rows.sort(key=lambda r: r["combined_score"], reverse=True)
+                for i, row in enumerate(lm_rows):
+                    row["lm_rank"] = i + 1
+
+                import pandas as pd
+                lm_df = pd.DataFrame(lm_rows)
+                lm_csv_path = os.path.join(stem_dir, "lm_candidates.csv")
+                lm_df.to_csv(lm_csv_path, index=False)
+                print(f"  Saved: {lm_csv_path}")
+
+                if lm_rows:
+                    top = lm_rows[0]
+                    if top["combined_score"] > -900:
+                        results.detected_raga = top["raga"]
+                        results.detected_tonic = top["tonic"]
+                    print(f"  LM Top: {top['raga']} (tonic={top['tonic_name']}, "
+                          f"combined={top['combined_score']}, lm={top['lm_score']}, "
+                          f"del_resid={top['del_residual']})")
+
+            _print_timing("Step 5.5/7 LM re-ranking", perf_counter() - step55_start, audio_duration_s)
+
         # --- DETECT MODE EXIT POINT ---
         if config.mode == "detect":
             step7_start = perf_counter()
@@ -1057,7 +1254,10 @@ def run_pipeline(
             
         # Apply Raga Correction
         correction_summary = {}
-        if raga_db and results.detected_raga:
+        if config.skip_raga_correction:
+            results.notes = raw_notes
+            print("  Raga correction skipped (--skip-raga-correction)")
+        elif raga_db and results.detected_raga:
             print(f"  Applying raga correction for {results.detected_raga}...")
             strict_raga_max_cents = max(float(getattr(config, "strict_raga_max_cents", 35.0)), 0.0)
             raga_max_distance = (strict_raga_max_cents / 100.0) if config.strict_raga_35c_filter else 1.0
@@ -1071,9 +1271,9 @@ def run_pipeline(
             if config.strict_raga_35c_filter:
                 print(f"  [INFO] Strict raga filter window: +/-{strict_raga_max_cents:.1f} cents")
             corrected_notes, correction_stats, _ = apply_raga_correction_to_notes(
-                raw_notes, 
-                raga_db, 
-                results.detected_raga, 
+                raw_notes,
+                raga_db,
+                results.detected_raga,
                 results.detected_tonic,
                 max_distance=raga_max_distance,
                 keep_impure=keep_impure_notes,

@@ -7,9 +7,10 @@ import { Header } from "@/components/layout/Header";
 import { FileDropZone } from "@/components/upload/FileDropZone";
 import { AdvancedOptions } from "@/components/upload/AdvancedOptions";
 import { uploadFile, uploadYoutube, checkYoutubeExists, listRagas } from "@/lib/api";
+import { RecordingPanel } from "@/components/upload/RecordingPanel";
 import Link from "next/link";
 
-type Tab = "file" | "youtube";
+type Tab = "file" | "youtube" | "record";
 
 function UploadForm() {
   const router = useRouter();
@@ -17,6 +18,8 @@ function UploadForm() {
   const [tab, setTab] = useState<Tab>("file");
   const [file, setFile] = useState<File | null>(null);
   const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [startTime, setStartTime] = useState("");
+  const [endTime, setEndTime] = useState("");
   const [youtubePreview, setYoutubePreview] = useState<{ videoId: string; exists: boolean; existingSongId?: string; existingTitle?: string } | null>(null);
   const [title, setTitle] = useState("");
   const [tonic, setTonic] = useState("");
@@ -27,6 +30,7 @@ function UploadForm() {
   const [visibility, setVisibility] = useState("private");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [advancedParams, setAdvancedParams] = useState<Record<string, unknown>>({});
+  const [recordingBlob, setRecordingBlob] = useState<Blob | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [ragas, setRagas] = useState<string[]>([]);
@@ -81,7 +85,7 @@ function UploadForm() {
           if (v !== null && v !== undefined && v !== "") formData.append(k, String(v));
         }
         await uploadFile(formData);
-      } else {
+      } else if (tab === "youtube") {
         if (!youtubeUrl) { setError("Please enter a YouTube URL"); setSubmitting(false); return; }
         const formData = new FormData();
         formData.append("youtube_url", youtubeUrl);
@@ -91,10 +95,29 @@ function UploadForm() {
         if (raga) formData.append("raga", raga);
         formData.append("instrument", instrument);
         if (vocalistGender) formData.append("vocalist_gender", vocalistGender);
+        if (startTime) formData.append("start_time", startTime);
+        if (endTime) formData.append("end_time", endTime);
         for (const [k, v] of Object.entries(advancedParams)) {
           if (v !== null && v !== undefined && v !== "") formData.append(k, String(v));
         }
         await uploadYoutube(formData);
+      } else if (tab === "record") {
+        if (!recordingBlob) { setError("Please record audio first"); setSubmitting(false); return; }
+        const formData = new FormData();
+        const ext = recordingBlob.type.includes("webm") ? "webm" : recordingBlob.type.includes("mp4") ? "mp4" : "ogg";
+        formData.append("file", new File([recordingBlob], `recording.${ext}`, { type: recordingBlob.type }));
+        formData.append("title", title || "Untitled Recording");
+        formData.append("source", "recording");
+        formData.append("visibility", "private");
+        if (songType) formData.append("song_type", songType);
+        if (tonic) formData.append("tonic", tonic);
+        if (raga) formData.append("raga", raga);
+        formData.append("instrument", instrument);
+        if (vocalistGender) formData.append("vocalist_gender", vocalistGender);
+        for (const [k, v] of Object.entries(advancedParams)) {
+          if (v !== null && v !== undefined && v !== "") formData.append(k, String(v));
+        }
+        await uploadFile(formData);
       }
       router.push("/library");
     } catch (err) {
@@ -118,12 +141,31 @@ function UploadForm() {
       <div className="flex border-b-2 border-bg-elevated mb-6">
         <button onClick={() => setTab("file")} className={`px-6 py-2.5 text-sm -mb-0.5 ${tab === "file" ? "text-text-primary font-semibold border-b-2 border-accent" : "text-text-muted"}`}>Upload File</button>
         <button onClick={() => setTab("youtube")} className={`px-6 py-2.5 text-sm -mb-0.5 ${tab === "youtube" ? "text-text-primary font-semibold border-b-2 border-accent" : "text-text-muted"}`}>YouTube URL</button>
+        <button onClick={() => setTab("record")} className={`px-6 py-2.5 text-sm -mb-0.5 ${tab === "record" ? "text-text-primary font-semibold border-b-2 border-accent" : "text-text-muted"}`}>Record</button>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-5">
-        {tab === "file" ? (
+        {tab === "file" && (
           <FileDropZone file={file} onFileChange={setFile} />
-        ) : (
+        )}
+        {tab === "record" && (
+          <RecordingPanel
+            onRecordingComplete={(blob) => {
+              setRecordingBlob(blob);
+              if (!title) setTitle(`Recording ${new Date().toLocaleDateString()}`);
+            }}
+            onTanpuraKeyChange={(key) => {
+              if (key) {
+                const TANPURA_TO_TONIC: Record<string, string> = {
+                  A: "A", Bb: "A#", B: "B", C: "C", Db: "C#", D: "D",
+                  Eb: "D#", E: "E", F: "F", Gb: "F#", G: "G", Ab: "G#",
+                };
+                setTonic(TANPURA_TO_TONIC[key] || "");
+              }
+            }}
+          />
+        )}
+        {tab === "youtube" && (
           <div>
             <label className="text-text-secondary text-xs font-medium block mb-1.5">YouTube URL</label>
             <input type="url" placeholder="https://youtube.com/watch?v=..." value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)}
@@ -139,6 +181,19 @@ function UploadForm() {
                 )}
               </div>
             )}
+            {/* Start/End Time */}
+            <div className="grid grid-cols-2 gap-4 mt-3">
+              <div>
+                <label className="text-text-secondary text-xs font-medium block mb-1.5">Start Time <span className="text-text-faint font-normal">(optional)</span></label>
+                <input type="text" placeholder="e.g. 1:30" value={startTime} onChange={(e) => setStartTime(e.target.value)}
+                  className="w-full bg-bg-elevated border border-border rounded-lg px-3.5 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent" />
+              </div>
+              <div>
+                <label className="text-text-secondary text-xs font-medium block mb-1.5">End Time <span className="text-text-faint font-normal">(optional)</span></label>
+                <input type="text" placeholder="e.g. 5:00" value={endTime} onChange={(e) => setEndTime(e.target.value)}
+                  className="w-full bg-bg-elevated border border-border rounded-lg px-3.5 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent" />
+              </div>
+            </div>
           </div>
         )}
 

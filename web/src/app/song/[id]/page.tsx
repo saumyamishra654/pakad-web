@@ -111,31 +111,66 @@ export default function SongResultsPage() {
           />
         )}
 
-        {/* Candidates table */}
+        {/* Candidates tables: LM-reranked (primary) + Histogram (secondary) */}
         {data.candidates.length > 0 && (
           <div className="mb-8">
             <h2 className="text-base font-semibold text-text-primary mb-3">Raga Candidates</h2>
-            <div className="bg-bg-card border border-border rounded-xl overflow-hidden">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border text-text-muted text-xs uppercase tracking-wide">
-                    <th className="text-left px-4 py-2.5 font-medium">Rank</th>
-                    <th className="text-left px-4 py-2.5 font-medium">Raga</th>
-                    <th className="text-left px-4 py-2.5 font-medium">Tonic</th>
-                    <th className="text-left px-4 py-2.5 font-medium">Score</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.candidates.slice(0, 10).map((c, i) => (
-                    <tr key={i} className={`border-b border-border last:border-b-0 ${i === 0 ? "bg-accent/5" : ""}`}>
-                      <td className="px-4 py-2.5 text-text-faint">{c.rank}</td>
-                      <td className={`px-4 py-2.5 font-medium ${i === 0 ? "text-accent-gold" : "text-text-secondary"}`}>{c.raga}</td>
-                      <td className="px-4 py-2.5 text-text-muted">{c.tonic}</td>
-                      <td className="px-4 py-2.5 text-text-muted">{c.score.toFixed(1)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* LM-reranked candidates (combined histogram + language model) */}
+              <div>
+                <h3 className="text-xs font-medium text-text-muted uppercase tracking-wide mb-2">Combined (Histogram + LM)</h3>
+                <div className="bg-bg-card border border-border rounded-xl overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border text-text-muted text-xs uppercase tracking-wide">
+                        <th className="text-left px-4 py-2.5 font-medium">Rank</th>
+                        <th className="text-left px-4 py-2.5 font-medium">Raga</th>
+                        <th className="text-left px-4 py-2.5 font-medium">Tonic</th>
+                        <th className="text-left px-4 py-2.5 font-medium">Score</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.candidates.slice(0, 10).map((c, i) => (
+                        <tr key={i} className={`border-b border-border last:border-b-0 ${i === 0 ? "bg-accent/5" : ""}`}>
+                          <td className="px-4 py-2.5 text-text-faint">{c.rank}</td>
+                          <td className={`px-4 py-2.5 font-medium ${i === 0 ? "text-accent-gold" : "text-text-secondary"}`}>{c.raga}</td>
+                          <td className="px-4 py-2.5 text-text-muted">{c.tonic}</td>
+                          <td className="px-4 py-2.5 text-text-muted">{c.score.toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Histogram-only candidates */}
+              {data.histogramCandidates?.length > 0 && (
+                <div>
+                  <h3 className="text-xs font-medium text-text-muted uppercase tracking-wide mb-2">Histogram Only</h3>
+                  <div className="bg-bg-card border border-border rounded-xl overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border text-text-muted text-xs uppercase tracking-wide">
+                          <th className="text-left px-4 py-2.5 font-medium">Rank</th>
+                          <th className="text-left px-4 py-2.5 font-medium">Raga</th>
+                          <th className="text-left px-4 py-2.5 font-medium">Tonic</th>
+                          <th className="text-left px-4 py-2.5 font-medium">Score</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.histogramCandidates.slice(0, 10).map((c, i) => (
+                          <tr key={i} className={`border-b border-border last:border-b-0 ${i === 0 ? "bg-accent/5" : ""}`}>
+                            <td className="px-4 py-2.5 text-text-faint">{c.rank}</td>
+                            <td className={`px-4 py-2.5 font-medium ${i === 0 ? "text-accent-gold" : "text-text-secondary"}`}>{c.raga}</td>
+                            <td className="px-4 py-2.5 text-text-muted">{c.tonic}</td>
+                            <td className="px-4 py-2.5 text-text-muted">{c.score.toFixed(1)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -144,11 +179,11 @@ export default function SongResultsPage() {
         <div className="mb-8">
           <h2 className="text-base font-semibold text-text-primary mb-3">Deep Analysis</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {data.vocalsHistogram && data.vocalsHistogram.length > 0 && (
-              <Histogram data={data.vocalsHistogram} title="Vocal Pitch Distribution" />
+            {data.vocalsHistogram?.highRes?.length > 0 && (
+              <Histogram data={data.vocalsHistogram} title="Vocal Pitch Distribution" color="amber" />
             )}
-            {data.accompanimentHistogram && data.accompanimentHistogram.length > 0 && (
-              <Histogram data={data.accompanimentHistogram} title="Accompaniment Pitch Distribution" />
+            {data.accompanimentHistogram?.highRes?.length > 0 && (
+              <Histogram data={data.accompanimentHistogram} title="Accompaniment Pitch Distribution" color="teal" />
             )}
             {data.transitionMatrix && data.transitionMatrix.notes.length > 0 && (
               <TransitionMatrix data={data.transitionMatrix} />

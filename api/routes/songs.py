@@ -83,6 +83,7 @@ def _fetch_youtube_title(video_id: str) -> Optional[str]:
 @router.post("/upload-file")
 async def upload_file(
     title: str = Form(...), visibility: str = Form("private"),
+    source: str = Form("file"),
     song_type: Optional[str] = Form(None), tonic: Optional[str] = Form(None),
     raga: Optional[str] = Form(None), instrument: str = Form("vocal"),
     vocalist_gender: Optional[str] = Form(None),
@@ -93,7 +94,7 @@ async def upload_file(
     content = await file.read()
     audio_hash = hashlib.sha256(content).hexdigest()[:16]
     song_id = firestore_client.create_song(
-        title=title, source="file", uploaded_by=user["uid"],
+        title=title, source=source, uploaded_by=user["uid"],
         audio_hash=audio_hash, visibility=visibility, song_type=song_type,
     )
     filename = file.filename or f"{song_id}.mp3"
@@ -115,6 +116,7 @@ async def upload_youtube(
     song_type: Optional[str] = Form(None), tonic: Optional[str] = Form(None),
     raga: Optional[str] = Form(None), instrument: str = Form("vocal"),
     vocalist_gender: Optional[str] = Form(None),
+    start_time: Optional[str] = Form(None), end_time: Optional[str] = Form(None),
     user: dict = Depends(get_current_user),
 ):
     import re
@@ -124,15 +126,15 @@ async def upload_youtube(
         raise HTTPException(status_code=400, detail="Invalid YouTube URL")
     video_id = match.group(1)
     existing = firestore_client.find_song_by_youtube_id(video_id)
+    yt_params = {"tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender,
+                  "start_time": start_time, "end_time": end_time}
     if existing:
         analysis_id = firestore_client.create_analysis(
             song_id=existing["id"], analysis_type="fork", owner_id=user["uid"],
-            params={"tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender},
+            params=yt_params,
         )
         from api.jobs import submit_job
-        job_id = submit_job(existing["id"], analysis_id, user["uid"], {
-            "tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender,
-        })
+        job_id = submit_job(existing["id"], analysis_id, user["uid"], yt_params)
         return {"songId": existing["id"], "analysisId": analysis_id, "jobId": job_id, "status": "processing", "reusedExisting": True}
     audio_hash = f"yt_{video_id}"
     song_id = firestore_client.create_song(
@@ -142,10 +144,8 @@ async def upload_youtube(
     )
     analysis_id = firestore_client.create_analysis(
         song_id=song_id, analysis_type="canonical", owner_id=user["uid"],
-        params={"tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender},
+        params=yt_params,
     )
     from api.jobs import submit_job
-    job_id = submit_job(song_id, analysis_id, user["uid"], {
-        "tonic": tonic, "raga": raga, "instrument": instrument, "vocalistGender": vocalist_gender,
-    })
+    job_id = submit_job(song_id, analysis_id, user["uid"], yt_params)
     return {"songId": song_id, "analysisId": analysis_id, "jobId": job_id, "status": "processing"}

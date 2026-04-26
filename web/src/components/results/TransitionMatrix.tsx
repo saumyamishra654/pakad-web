@@ -27,7 +27,7 @@ export function TransitionMatrix({ data }: { data: { notes: string[]; matrix: nu
                   const intensity = val / maxVal;
                   return (
                     <td key={j} className="w-6 h-6"
-                      style={{ backgroundColor: intensity > 0 ? `rgba(191, 110, 19, ${0.1 + intensity * 0.8})` : "transparent" }}
+                      style={{ backgroundColor: intensity > 0 ? `rgba(61, 139, 120, ${0.1 + intensity * 0.8})` : "transparent" }}
                       title={`${data.notes[i]} -> ${data.notes[j]}: ${val}`} />
                   );
                 })}

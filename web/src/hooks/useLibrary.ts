@@ -41,7 +41,7 @@ export function useLibrary() {
     if (filter === "processing") return song.status === "processing";
     if (filter === "complete") return song.status === "complete";
     if (filter === "youtube") return song.source === "youtube";
-    if (filter === "uploaded") return song.source === "file";
+    if (filter === "uploaded") return song.source === "file" || song.source === "recording";
     return true;
   });
 
