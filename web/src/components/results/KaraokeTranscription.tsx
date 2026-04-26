@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 
 interface Note {
   start: number;
@@ -30,6 +30,22 @@ export function KaraokeTranscription({
   onSeek?: (time: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const activeRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to keep the active phrase visible
+  useEffect(() => {
+    const el = activeRef.current;
+    const container = containerRef.current;
+    if (!el || !container) return;
+    const elTop = el.offsetTop - container.offsetTop;
+    const elBottom = elTop + el.offsetHeight;
+    const scrollTop = container.scrollTop;
+    const viewHeight = container.clientHeight;
+    if (elTop < scrollTop || elBottom > scrollTop + viewHeight) {
+      container.scrollTo({ top: Math.max(0, elTop - viewHeight / 3), behavior: "smooth" });
+    }
+  }, [currentTime]);
 
   const phrases = useMemo(() => {
     if (notes.length === 0) return [];
@@ -57,6 +73,15 @@ export function KaraokeTranscription({
     return result;
   }, [notes]);
 
+  // Auto-expand when playback reaches phrases beyond the collapsed set
+  useEffect(() => {
+    if (expanded || phrases.length <= 8) return;
+    const activeIdx = phrases.findIndex(
+      (p) => currentTime >= p.startTime && currentTime <= p.endTime
+    );
+    if (activeIdx >= 8) setExpanded(true);
+  }, [currentTime, expanded, phrases]);
+
   const displayPhrases = expanded ? phrases : phrases.slice(0, 8);
 
   return (
@@ -64,13 +89,18 @@ export function KaraokeTranscription({
       <h2 className="text-base font-semibold text-text-primary mb-3">
         Transcription
       </h2>
-      <div className="bg-bg-card border border-border rounded-xl p-4 font-mono">
+      <div
+        ref={containerRef}
+        className="bg-bg-card border border-border rounded-xl p-4 font-mono overflow-y-auto"
+        style={{ maxHeight: 320 }}
+      >
         {displayPhrases.map((phrase, i) => {
           const isActive =
             currentTime >= phrase.startTime && currentTime <= phrase.endTime;
           return (
             <div
               key={i}
+              ref={isActive ? activeRef : undefined}
               onClick={() => onSeek?.(phrase.startTime)}
               className={`mb-2 px-3 py-1.5 rounded-md cursor-pointer transition-colors ${
                 isActive

@@ -49,6 +49,9 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+/** Stems that have pitch data (vocals, accompaniment — not original) */
+const PITCH_STEMS = ["vocals", "accompaniment"];
+
 export function PitchContour({
   songId,
   stem = "vocals",
@@ -68,6 +71,7 @@ export function PitchContour({
   onSeek?: (time: number) => void;
   transcription?: TranscriptionNote[];
 }) {
+  const [pitchStem, setPitchStem] = useState(stem);
   const [points, setPoints] = useState<PitchPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [hoverInfo, setHoverInfo] = useState<{
@@ -79,14 +83,14 @@ export function PitchContour({
   const lastSeekRef = useRef(0);
   const rafRef = useRef(0);
 
-  // Fetch pitch data
+  // Fetch pitch data using the independently-selected pitch stem
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/results/${songId}/pitch/${stem}`)
+    fetch(`/api/results/${songId}/pitch/${pitchStem}`)
       .then((r) => r.json())
       .then((data) => { setPoints(data.points || []); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [songId, stem]);
+  }, [songId, pitchStem]);
 
   // Compute MIDI range
   const { minMidi, maxMidi, tonic } = useMemo(() => {
@@ -284,7 +288,25 @@ export function PitchContour({
   }
 
   return (
-    <div className="bg-bg-card border border-border rounded-xl overflow-hidden flex relative" style={{ height: PLOT_HEIGHT }}>
+    <div className="bg-bg-card border border-border rounded-xl overflow-hidden relative" style={{ height: PLOT_HEIGHT + 36 }}>
+      {/* Pitch stem selector */}
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-bg-card">
+        <span className="text-text-faint text-[10px] uppercase tracking-wide mr-1">Pitch:</span>
+        {PITCH_STEMS.map((s) => (
+          <button
+            key={s}
+            onClick={() => setPitchStem(s)}
+            className={`px-2.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+              pitchStem === s
+                ? "bg-accent/20 text-accent"
+                : "text-text-faint hover:text-text-muted"
+            }`}
+          >
+            {s.charAt(0).toUpperCase() + s.slice(1)}
+          </button>
+        ))}
+      </div>
+      <div className="flex relative" style={{ height: PLOT_HEIGHT }}>
       {/* Sticky sargam labels */}
       <div className="flex-shrink-0 bg-bg-card border-r border-border z-10" style={{ width: LABEL_WIDTH }}>
         <svg width={LABEL_WIDTH} height={PLOT_HEIGHT}>
@@ -460,6 +482,7 @@ export function PitchContour({
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

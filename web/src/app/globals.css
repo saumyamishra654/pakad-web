@@ -34,3 +34,22 @@ body {
   background-color: #1a1208;
   color: #f5e6d0;
 }
+
+/* Dark scrollbars for pitch contour and other scrollable areas */
+* {
+  scrollbar-color: #3a2a14 #0d0a04;
+}
+*::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: #0d0a04;
+}
+*::-webkit-scrollbar-thumb {
+  background: #3a2a14;
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #5a4a30;
+}

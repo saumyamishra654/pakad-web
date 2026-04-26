@@ -44,12 +44,22 @@ export function RecordingPanel({ onRecordingComplete, onTanpuraKeyChange }: Reco
       .catch(() => {});
   }, []);
 
+  // Acquire mic permission once on mount, reuse the stream across recordings
+  useEffect(() => {
+    let cancelled = false;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+      if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+      streamRef.current = stream;
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (tanpuraRef.current) { tanpuraRef.current.pause(); tanpuraRef.current = null; }
-      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+      if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
       if (playbackUrl) URL.revokeObjectURL(playbackUrl);
     };
   }, [playbackUrl]);
@@ -62,8 +72,12 @@ export function RecordingPanel({ onRecordingComplete, onTanpuraKeyChange }: Reco
   async function startRecording() {
     setError("");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
+      // Reuse existing stream or request a new one if it was lost
+      let stream = streamRef.current;
+      if (!stream || stream.getTracks().every((t) => t.readyState === "ended")) {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+      }
 
       // Start tanpura if key selected
       if (selectedKey) {
@@ -90,9 +104,7 @@ export function RecordingPanel({ onRecordingComplete, onTanpuraKeyChange }: Reco
         setState("recorded");
         // Stop tanpura
         if (tanpuraRef.current) { tanpuraRef.current.pause(); tanpuraRef.current = null; }
-        // Stop mic
-        stream.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
+        // Keep mic stream alive for re-recording — only released on unmount
       };
 
       mediaRecorderRef.current = recorder;

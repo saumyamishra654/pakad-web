@@ -73,7 +73,6 @@ export default function SongResultsPage() {
             <AudioPlayer stems={data.stems} {...player} />
             <PitchContour
               songId={songId}
-              stem={player.activeStem}
               tonicMidi={data.detection.tonicMidi}
               currentTimeRef={player.currentTimeRef}
               duration={player.duration}
