@@ -1,5 +1,8 @@
 .local_app_data/
 __pycache__/
+CLAUDE.md
+docs/superpowers/
+.superpowers/
 *.pyc
 *.pyc
 .env
