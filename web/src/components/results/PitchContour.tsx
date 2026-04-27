@@ -353,7 +353,7 @@ export function PitchContour({
               x={LABEL_WIDTH - 6}
               y={yScale(line.midi) + 3}
               textAnchor="end"
-              fill={line.isTonic ? "#d4942a" : "#5a4a30"}
+              style={{ fill: line.isTonic ? "var(--color-plot-label-tonic)" : "var(--color-plot-label)" }}
               fontSize={10}
               fontFamily="monospace"
               fontWeight={line.isTonic ? "bold" : "normal"}
@@ -374,7 +374,7 @@ export function PitchContour({
           onMouseLeave={() => setHoverInfo(null)}
         >
           {/* Plot background */}
-          <rect x={0} y={MARGIN.top} width={totalWidth} height={plotH} fill="#0d0a04" />
+          <rect x={0} y={MARGIN.top} width={totalWidth} height={plotH} style={{ fill: "var(--color-plot-bg)" }} />
 
           {/* Phrase background spans */}
           {phrases.map((phrase) => (
@@ -384,7 +384,7 @@ export function PitchContour({
               y={MARGIN.top}
               width={xScale(phrase.endTime) - xScale(phrase.startTime)}
               height={plotH}
-              fill={phrase.index % 2 === 0 ? "rgba(191, 110, 19, 0.04)" : "rgba(212, 148, 42, 0.04)"}
+              style={{ fill: phrase.index % 2 === 0 ? "var(--color-plot-phrase-even)" : "var(--color-plot-phrase-odd)" }}
             />
           ))}
 
@@ -401,7 +401,7 @@ export function PitchContour({
                     y={MARGIN.top}
                     width={Math.max(2, xScale(occ.end) - xScale(occ.start))}
                     height={plotH}
-                    fill={`rgba(61, 139, 120, ${opacity.toFixed(3)})`}
+                    style={{ fill: `rgb(var(--color-accent-teal-rgb) / ${opacity.toFixed(3)})` }}
                     className="pointer-events-none"
                   />
                 );
@@ -417,7 +417,7 @@ export function PitchContour({
               y1={yScale(line.midi)}
               x2={totalWidth}
               y2={yScale(line.midi)}
-              stroke={line.isTonic ? "#3a2a14" : "#1a1408"}
+              style={{ stroke: line.isTonic ? "var(--color-plot-grid-tonic)" : "var(--color-plot-grid)" }}
               strokeWidth={line.isTonic ? 1.5 : 0.5}
               strokeDasharray={line.isTonic ? "none" : "4 4"}
             />
@@ -431,7 +431,7 @@ export function PitchContour({
               y1={MARGIN.top}
               x2={xScale(t.time)}
               y2={MARGIN.top + plotH}
-              stroke="#1a1408"
+              style={{ stroke: "var(--color-plot-grid)" }}
               strokeWidth={0.5}
               strokeDasharray="4 4"
             />
@@ -452,7 +452,7 @@ export function PitchContour({
                   y={y - 8}
                   width={w}
                   height={16}
-                  fill="rgba(191, 110, 19, 0.15)"
+                  style={{ fill: "var(--color-plot-note-bar)" }}
                   rx={2}
                 />
                 {/* Sargam label */}
@@ -461,7 +461,7 @@ export function PitchContour({
                     x={x + w / 2}
                     y={y + 3}
                     textAnchor="middle"
-                    fill="#d4942a"
+                    style={{ fill: "var(--color-plot-note-label)" }}
                     fontSize={9}
                     fontFamily="monospace"
                     opacity={0.8}
@@ -480,7 +480,7 @@ export function PitchContour({
               x={xScale(t.time)}
               y={PLOT_HEIGHT - 8}
               textAnchor="middle"
-              fill="#5a4a30"
+              style={{ fill: "var(--color-plot-label)" }}
               fontSize={10}
               fontFamily="monospace"
             >
@@ -498,7 +498,7 @@ export function PitchContour({
                 cx={startX}
                 cy={startY}
                 r={2.5}
-                fill="#ef4444"
+                style={{ fill: "var(--color-plot-inflection)" }}
                 opacity={0.7}
               />
             );
@@ -511,21 +511,21 @@ export function PitchContour({
               <line
                 x1={hoverInfo.svgX} y1={MARGIN.top}
                 x2={hoverInfo.svgX} y2={MARGIN.top + plotH}
-                stroke="white" strokeWidth={0.5} strokeDasharray="4 3" opacity={0.4}
+                style={{ stroke: "var(--color-plot-crosshair)" }} strokeWidth={0.5} strokeDasharray="4 3"
                 className="pointer-events-none"
               />
               {/* Horizontal line to Y axis */}
               <line
                 x1={0} y1={hoverInfo.svgY}
                 x2={totalWidth} y2={hoverInfo.svgY}
-                stroke="white" strokeWidth={0.5} strokeDasharray="4 3" opacity={0.4}
+                style={{ stroke: "var(--color-plot-crosshair)" }} strokeWidth={0.5} strokeDasharray="4 3"
                 className="pointer-events-none"
               />
             </>
           )}
 
           {/* Pitch curve */}
-          <path d={pathD} fill="none" stroke="#bf6e13" strokeWidth={1.5} opacity={0.9} />
+          <path d={pathD} fill="none" style={{ stroke: "var(--color-plot-curve)" }} strokeWidth={1.5} opacity={0.9} />
         </svg>
 
         {/* Playhead */}
@@ -535,7 +535,7 @@ export function PitchContour({
           style={{
             width: 2,
             height: PLOT_HEIGHT - MARGIN.bottom,
-            backgroundColor: "#bf6e13",
+            backgroundColor: "var(--color-plot-playhead)",
             opacity: 0.8,
           }}
         />
