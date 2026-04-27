@@ -5,10 +5,16 @@ import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { useAuthContext } from "./AuthProvider";
+import { useTheme } from "./ThemeProvider";
 
 export function Header() {
   const { user } = useAuthContext();
   const router = useRouter();
+  const { theme, cycleTheme } = useTheme();
+
+  const themeIcon = theme === "dark" ? "\u263D" : theme === "light" ? "\u2600" : "\u25D0";
+  const themeLabel = theme === "dark" ? "Dark" : theme === "light" ? "Light" : "Auto";
+  const nextLabel = theme === "dark" ? "light" : theme === "light" ? "auto" : "dark";
 
   async function handleSignOut() {
     await signOut(auth);
@@ -25,6 +31,10 @@ export function Header() {
           <Link href="/explore" className="text-text-secondary hover:text-text-primary transition-colors text-sm">
             Explore
           </Link>
+          <button onClick={cycleTheme} className="text-text-secondary hover:text-text-primary transition-colors text-sm" aria-label={`Switch to ${nextLabel} theme`} title={`Theme: ${themeLabel}`}>
+            {themeIcon}
+            <span className="sr-only">Theme: {themeLabel}</span>
+          </button>
           <Link href="/" className="text-accent hover:opacity-90 text-sm font-medium transition-opacity">
             Sign in
           </Link>
@@ -52,6 +62,10 @@ export function Header() {
         <Link href="/explore" className="text-text-secondary hover:text-text-primary transition-colors text-sm">
           Explore
         </Link>
+        <button onClick={cycleTheme} className="text-text-secondary hover:text-text-primary transition-colors text-sm" aria-label={`Switch to ${nextLabel} theme`} title={`Theme: ${themeLabel}`}>
+          {themeIcon}
+          <span className="sr-only">Theme: {themeLabel}</span>
+        </button>
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-full bg-bg-elevated flex items-center justify-center text-xs text-text-secondary">
             {initials}
