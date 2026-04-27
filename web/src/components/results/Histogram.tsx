@@ -7,14 +7,14 @@ interface DualHistogramData {
 
 const COLORS = {
   amber: {
-    bar: "rgba(191, 110, 19, 0.25)",
-    curve: "#bf6e13",
-    fill: "rgba(191, 110, 19, 0.07)",
+    bar: "var(--color-hist-amber-bar)",
+    curve: "var(--color-hist-amber-curve)",
+    fill: "var(--color-hist-amber-fill)",
   },
   teal: {
-    bar: "rgba(61, 139, 120, 0.25)",
-    curve: "#3d8b78",
-    fill: "rgba(61, 139, 120, 0.07)",
+    bar: "var(--color-hist-teal-bar)",
+    curve: "var(--color-hist-teal-curve)",
+    fill: "var(--color-hist-teal-fill)",
   },
 };
 
