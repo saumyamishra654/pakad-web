@@ -28,11 +28,79 @@
   /* Fonts */
   --font-sans: system-ui, sans-serif;
   --font-mono: ui-monospace, monospace;
+
+  /* Plot colors (dark defaults) */
+  --color-plot-bg: #0d0a04;
+  --color-plot-grid: #1a1408;
+  --color-plot-grid-tonic: #3a2a14;
+  --color-plot-curve: #bf6e13;
+  --color-plot-playhead: #bf6e13;
+  --color-plot-label: #5a4a30;
+  --color-plot-label-tonic: #d4942a;
+  --color-plot-note-bar: rgba(191, 110, 19, 0.15);
+  --color-plot-note-label: #d4942a;
+  --color-plot-inflection: #ef4444;
+  --color-plot-phrase-even: rgba(191, 110, 19, 0.04);
+  --color-plot-phrase-odd: rgba(212, 148, 42, 0.04);
+  --color-plot-crosshair: rgba(255, 255, 255, 0.4);
+
+  /* Histogram colors (dark defaults) */
+  --color-hist-amber-bar: rgba(191, 110, 19, 0.25);
+  --color-hist-amber-curve: #bf6e13;
+  --color-hist-amber-fill: rgba(191, 110, 19, 0.07);
+  --color-hist-teal-bar: rgba(61, 139, 120, 0.25);
+  --color-hist-teal-curve: #3d8b78;
+  --color-hist-teal-fill: rgba(61, 139, 120, 0.07);
+
+  /* RGB channel variables for dynamic alpha */
+  --color-accent-teal-rgb: 61 139 120;
+  --color-accent-rgb: 191 110 19;
+}
+
+[data-theme="light"] {
+  --color-bg: #f5ede0;
+  --color-bg-card: #faf5ec;
+  --color-bg-elevated: #ffffff;
+  --color-border: #d4c4a8;
+  --color-accent: #a85d0f;
+  --color-accent-gold: #8a5a1a;
+  --color-accent-teal: #2d7a66;
+  --color-text-primary: #2a1f0e;
+  --color-text-secondary: #5a4a30;
+  --color-text-muted: #7a6a50;
+  --color-text-faint: #9a8a6a;
+  --color-status-success: #16a34a;
+  --color-status-warning: #d97706;
+  --color-status-error: #dc2626;
+
+  --color-plot-bg: #faf5ec;
+  --color-plot-grid: rgba(212, 196, 168, 0.25);
+  --color-plot-grid-tonic: rgba(196, 168, 114, 0.38);
+  --color-plot-curve: #a85d0f;
+  --color-plot-playhead: #a85d0f;
+  --color-plot-label: #9a8a6a;
+  --color-plot-label-tonic: #a85d0f;
+  --color-plot-note-bar: rgba(168, 93, 15, 0.12);
+  --color-plot-note-label: #a85d0f;
+  --color-plot-inflection: #dc2626;
+  --color-plot-phrase-even: rgba(168, 93, 15, 0.06);
+  --color-plot-phrase-odd: rgba(138, 90, 26, 0.06);
+  --color-plot-crosshair: rgba(0, 0, 0, 0.2);
+
+  --color-hist-amber-bar: rgba(168, 93, 15, 0.2);
+  --color-hist-amber-curve: #a85d0f;
+  --color-hist-amber-fill: rgba(168, 93, 15, 0.08);
+  --color-hist-teal-bar: rgba(45, 122, 102, 0.2);
+  --color-hist-teal-curve: #2d7a66;
+  --color-hist-teal-fill: rgba(45, 122, 102, 0.08);
+
+  --color-accent-teal-rgb: 45 122 102;
+  --color-accent-rgb: 168 93 15;
 }
 
 body {
-  background-color: #1a1208;
-  color: #f5e6d0;
+  background-color: var(--color-bg);
+  color: var(--color-text-primary);
 }
 
 /* Dark scrollbars for pitch contour and other scrollable areas */
@@ -52,4 +120,18 @@ body {
 }
 *::-webkit-scrollbar-thumb:hover {
   background: #5a4a30;
+}
+
+[data-theme="light"] * {
+  scrollbar-color: #c4a872 #f5ede0;
+}
+[data-theme="light"] *::-webkit-scrollbar-track {
+  background: #f5ede0;
+}
+[data-theme="light"] *::-webkit-scrollbar-thumb {
+  background: #c4a872;
+  border-radius: 4px;
+}
+[data-theme="light"] *::-webkit-scrollbar-thumb:hover {
+  background: #a08050;
 }
