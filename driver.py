@@ -1108,6 +1108,101 @@ def run_pipeline(
                           f"combined={top['combined_score']}, lm={top['lm_score']}, "
                           f"del_resid={top['del_residual']})")
 
+                # Generate n-gram evidence for the winning raga
+                if lm_rows and lm_rows[0]["combined_score"] > -900:
+                    from raga_pipeline.sequence import tokenize_notes_for_lm_with_map
+                    from collections import defaultdict
+
+                    win_raga = lm_rows[0]["raga"]
+                    win_tonic = int(lm_rows[0]["tonic"])
+                    win_tonic_midi = 60.0 + win_tonic
+                    ev_phrases, note_map = tokenize_notes_for_lm_with_map(
+                        merged_notes, win_tonic_midi
+                    )
+                    _, token_evidence = lm_model.score_sequence_with_evidence(
+                        win_raga, ev_phrases
+                    )
+
+                    # Build reverse lookup: (phrase_idx, token_idx) -> note
+                    tok_to_note = {}
+                    for pi, ti, ni in note_map:
+                        tok_to_note[(pi, ti)] = merged_notes[ni]
+
+                    # Deduplicate by n-gram, collect occurrences
+                    ngram_groups = defaultdict(lambda: {
+                        "order": 0, "entropy_weight": 0.0,
+                        "total_contribution": 0.0, "occurrences": [],
+                    })
+                    for ev in token_evidence:
+                        key = tuple(ev["ngram"])
+                        g = ngram_groups[key]
+                        g["order"] = ev["order"]
+                        g["entropy_weight"] = max(g["entropy_weight"], ev["entropy_weight"])
+                        g["total_contribution"] += ev["contribution"]
+                        note = tok_to_note.get((ev["phrase_idx"], ev["token_idx"]))
+                        if note:
+                            # Build the time span covering the full n-gram
+                            first_tok_idx = ev["token_idx"] - ev["order"] + 1
+                            first_note = tok_to_note.get((ev["phrase_idx"], max(1, first_tok_idx)))
+                            start_t = first_note.start if first_note else note.start
+                            g["occurrences"].append({
+                                "start": round(start_t, 3),
+                                "end": round(note.end, 3),
+                                "phrase_idx": ev["phrase_idx"],
+                            })
+
+                    # Rank by entropy weight (raga-specificity), break ties by
+                    # occurrence count (prefer patterns that recur throughout)
+                    sorted_ngrams = sorted(
+                        ngram_groups.items(),
+                        key=lambda x: (x[1]["entropy_weight"], len(x[1]["occurrences"])),
+                        reverse=True,
+                    )[:20]
+
+                    top_evidence = []
+                    for ng_tuple, g in sorted_ngrams:
+                        top_evidence.append({
+                            "ngram": list(ng_tuple),
+                            "order": g["order"],
+                            "entropy_weight": round(g["entropy_weight"], 4),
+                            "total_contribution": round(g["total_contribution"], 4),
+                            "occurrence_count": len(g["occurrences"]),
+                            "occurrences": g["occurrences"],
+                        })
+
+                    # Per-phrase summary
+                    phrase_scores = defaultdict(lambda: {"score": 0.0, "token_count": 0})
+                    for ev in token_evidence:
+                        ps = phrase_scores[ev["phrase_idx"]]
+                        ps["score"] += ev["contribution"]
+                        ps["token_count"] += 1
+
+                    phrases_summary = []
+                    for pi in sorted(phrase_scores.keys()):
+                        # Find first and last note in this phrase
+                        phrase_notes = [
+                            merged_notes[ni] for ppi, ti, ni in note_map if ppi == pi
+                        ]
+                        if phrase_notes:
+                            phrases_summary.append({
+                                "phrase_idx": pi,
+                                "start": round(phrase_notes[0].start, 3),
+                                "end": round(phrase_notes[-1].end, 3),
+                                "phrase_score": round(phrase_scores[pi]["score"], 4),
+                                "token_count": phrase_scores[pi]["token_count"],
+                            })
+
+                    evidence_payload = {
+                        "raga": win_raga,
+                        "total_score": round(lm_rows[0]["lm_score"], 4),
+                        "top_evidence": top_evidence,
+                        "phrases": phrases_summary,
+                    }
+                    ev_path = os.path.join(stem_dir, "lm_evidence.json")
+                    with open(ev_path, "w", encoding="utf-8") as _ef:
+                        _json.dump(evidence_payload, _ef, indent=2)
+                    print(f"  Saved: {ev_path} ({len(top_evidence)} top n-grams)")
+
             _print_timing("Step 5.5/7 LM re-ranking", perf_counter() - step55_start, audio_duration_s)
 
         # --- DETECT MODE EXIT POINT ---

@@ -11,6 +11,7 @@ import { Histogram } from "@/components/results/Histogram";
 import { TransitionMatrix } from "@/components/results/TransitionMatrix";
 import { PatternAnalysis } from "@/components/results/PatternAnalysis";
 import { CorrectionBar } from "@/components/results/CorrectionBar";
+import { NgramEvidence } from "@/components/results/NgramEvidence";
 import { CommentSection } from "@/components/comments/CommentSection";
 import { useResults } from "@/hooks/useResults";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
@@ -79,6 +80,7 @@ export default function SongResultsPage() {
               isPlaying={player.isPlaying}
               onSeek={player.seek}
               transcription={data.transcription}
+              ngramEvidence={data.lmEvidence?.top_evidence}
             />
           </div>
         )}
@@ -172,6 +174,11 @@ export default function SongResultsPage() {
               )}
             </div>
           </div>
+        )}
+
+        {/* N-gram evidence */}
+        {data.lmEvidence && (
+          <NgramEvidence evidence={data.lmEvidence} onSeek={player.seek} />
         )}
 
         {/* Deep Analysis: histograms + transition matrix */}

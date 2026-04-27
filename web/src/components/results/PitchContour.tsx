@@ -52,6 +52,21 @@ function formatTime(seconds: number): string {
 /** Stems that have pitch data (vocals, accompaniment — not original) */
 const PITCH_STEMS = ["vocals", "accompaniment"];
 
+interface NgramOccurrence {
+  start: number;
+  end: number;
+  phrase_idx: number;
+}
+
+interface NgramEvidenceItem {
+  ngram: string[];
+  order: number;
+  entropy_weight: number;
+  total_contribution: number;
+  occurrence_count: number;
+  occurrences: NgramOccurrence[];
+}
+
 export function PitchContour({
   songId,
   stem = "vocals",
@@ -61,6 +76,7 @@ export function PitchContour({
   isPlaying,
   onSeek,
   transcription,
+  ngramEvidence,
 }: {
   songId: string;
   stem?: string;
@@ -70,12 +86,15 @@ export function PitchContour({
   isPlaying: boolean;
   onSeek?: (time: number) => void;
   transcription?: TranscriptionNote[];
+  ngramEvidence?: NgramEvidenceItem[];
 }) {
   const [pitchStem, setPitchStem] = useState(stem);
+  const [showNgrams, setShowNgrams] = useState(false);
   const [points, setPoints] = useState<PitchPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [hoverInfo, setHoverInfo] = useState<{
-    x: number; y: number; time: number; freq: number; midi: number;
+    x: number; y: number; svgX: number; svgY: number;
+    time: number; freq: number; midi: number;
     sargam: string; western: string;
   } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -223,27 +242,27 @@ export function PitchContour({
 
   useEffect(() => { handleSeekSnap(); }, [handleSeekSnap]);
 
-  function handleClick(e: React.MouseEvent<SVGSVGElement>) {
+  function handleClick(e: React.MouseEvent) {
     if (!onSeek) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const scrollLeft = scrollRef.current?.scrollLeft ?? 0;
-    const x = e.clientX - rect.left + scrollLeft;
+    const container = scrollRef.current;
+    if (!container) return;
+    const containerRect = container.getBoundingClientRect();
+    const x = e.clientX - containerRect.left + container.scrollLeft;
     const time = (x / totalWidth) * duration;
     lastSeekRef.current = Date.now();
     onSeek(Math.max(0, Math.min(duration, time)));
     setTimeout(() => {
-      if (scrollRef.current) {
-        const viewWidth = scrollRef.current.clientWidth;
-        scrollRef.current.scrollLeft = Math.max(0, x - viewWidth / 2);
-      }
+      const viewWidth = container.clientWidth;
+      container.scrollLeft = Math.max(0, x - viewWidth / 2);
     }, 0);
   }
 
-  function handleMouseMove(e: React.MouseEvent<SVGSVGElement>) {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const scrollLeft = scrollRef.current?.scrollLeft ?? 0;
-    const mx = e.clientX - rect.left + scrollLeft;
-    const my = e.clientY - rect.top;
+  function handleMouseMove(e: React.MouseEvent) {
+    const container = scrollRef.current;
+    if (!container) return;
+    const containerRect = container.getBoundingClientRect();
+    const mx = e.clientX - containerRect.left + container.scrollLeft;
+    const my = e.clientY - containerRect.top;
     const time = (mx / totalWidth) * duration;
 
     // Find nearest pitch point by time (binary search)
@@ -260,9 +279,13 @@ export function PitchContour({
     }
 
     const midi = freqToMidi(nearest.frequency);
+    const svgX = xScale(nearest.time);
+    const svgY = yScale(midi);
     setHoverInfo({
-      x: e.clientX - rect.left + 15,
+      x: e.clientX - containerRect.left + 15,
       y: Math.min(my, PLOT_HEIGHT - 80),
+      svgX,
+      svgY,
       time: nearest.time,
       freq: nearest.frequency,
       midi,
@@ -289,22 +312,36 @@ export function PitchContour({
 
   return (
     <div className="bg-bg-card border border-border rounded-xl overflow-hidden relative" style={{ height: PLOT_HEIGHT + 36 }}>
-      {/* Pitch stem selector */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-bg-card">
-        <span className="text-text-faint text-[10px] uppercase tracking-wide mr-1">Pitch:</span>
-        {PITCH_STEMS.map((s) => (
+      {/* Pitch stem selector + n-gram toggle */}
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-bg-card">
+        <div className="flex items-center gap-2">
+          <span className="text-text-faint text-[10px] uppercase tracking-wide mr-1">Pitch:</span>
+          {PITCH_STEMS.map((s) => (
+            <button
+              key={s}
+              onClick={() => setPitchStem(s)}
+              className={`px-2.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                pitchStem === s
+                  ? "bg-accent/20 text-accent"
+                  : "text-text-faint hover:text-text-muted"
+              }`}
+            >
+              {s.charAt(0).toUpperCase() + s.slice(1)}
+            </button>
+          ))}
+        </div>
+        {ngramEvidence && ngramEvidence.length > 0 && (
           <button
-            key={s}
-            onClick={() => setPitchStem(s)}
+            onClick={() => setShowNgrams(!showNgrams)}
             className={`px-2.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
-              pitchStem === s
-                ? "bg-accent/20 text-accent"
+              showNgrams
+                ? "bg-accent-teal/20 text-accent-teal"
                 : "text-text-faint hover:text-text-muted"
             }`}
           >
-            {s.charAt(0).toUpperCase() + s.slice(1)}
+            N-grams
           </button>
-        ))}
+        )}
       </div>
       <div className="flex relative" style={{ height: PLOT_HEIGHT }}>
       {/* Sticky sargam labels */}
@@ -328,12 +365,11 @@ export function PitchContour({
       </div>
 
       {/* Scrollable plot area */}
-      <div ref={scrollRef} className="flex-1 overflow-x-auto relative" style={{ height: PLOT_HEIGHT }}>
+      <div ref={scrollRef} className="flex-1 overflow-x-auto relative cursor-crosshair" style={{ height: PLOT_HEIGHT }}
+        onClick={handleClick}>
         <svg
           width={totalWidth}
           height={PLOT_HEIGHT}
-          className="cursor-crosshair"
-          onClick={handleClick}
           onMouseMove={handleMouseMove}
           onMouseLeave={() => setHoverInfo(null)}
         >
@@ -351,6 +387,27 @@ export function PitchContour({
               fill={phrase.index % 2 === 0 ? "rgba(191, 110, 19, 0.04)" : "rgba(212, 148, 42, 0.04)"}
             />
           ))}
+
+          {/* N-gram evidence highlights */}
+          {showNgrams && ngramEvidence && (() => {
+            const maxContrib = Math.max(...ngramEvidence.map((e) => Math.abs(e.total_contribution)), 0.001);
+            return ngramEvidence.flatMap((ev, ei) =>
+              ev.occurrences.map((occ, oi) => {
+                const opacity = 0.08 + 0.22 * (Math.abs(ev.total_contribution) / maxContrib);
+                return (
+                  <rect
+                    key={`ng-${ei}-${oi}`}
+                    x={xScale(occ.start)}
+                    y={MARGIN.top}
+                    width={Math.max(2, xScale(occ.end) - xScale(occ.start))}
+                    height={plotH}
+                    fill={`rgba(61, 139, 120, ${opacity.toFixed(3)})`}
+                    className="pointer-events-none"
+                  />
+                );
+              })
+            );
+          })()}
 
           {/* Sargam grid lines (dotted) */}
           {gridLines.map((line, i) => (
@@ -446,6 +503,26 @@ export function PitchContour({
               />
             );
           })}
+
+          {/* Hover crosshair lines */}
+          {hoverInfo && (
+            <>
+              {/* Vertical line to X axis */}
+              <line
+                x1={hoverInfo.svgX} y1={MARGIN.top}
+                x2={hoverInfo.svgX} y2={MARGIN.top + plotH}
+                stroke="white" strokeWidth={0.5} strokeDasharray="4 3" opacity={0.4}
+                className="pointer-events-none"
+              />
+              {/* Horizontal line to Y axis */}
+              <line
+                x1={0} y1={hoverInfo.svgY}
+                x2={totalWidth} y2={hoverInfo.svgY}
+                stroke="white" strokeWidth={0.5} strokeDasharray="4 3" opacity={0.4}
+                className="pointer-events-none"
+              />
+            </>
+          )}
 
           {/* Pitch curve */}
           <path d={pathD} fill="none" stroke="#bf6e13" strokeWidth={1.5} opacity={0.9} />

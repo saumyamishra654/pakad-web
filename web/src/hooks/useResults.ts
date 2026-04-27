@@ -23,6 +23,25 @@ export interface ResultsData {
   transitionMatrix: { notes: string[]; matrix: number[][] };
   correctionSummary: Record<string, number>;
   patternAnalysis: Record<string, unknown>;
+  lmEvidence: {
+    raga: string;
+    total_score: number;
+    top_evidence: {
+      ngram: string[];
+      order: number;
+      entropy_weight: number;
+      total_contribution: number;
+      occurrence_count: number;
+      occurrences: { start: number; end: number; phrase_idx: number }[];
+    }[];
+    phrases: {
+      phrase_idx: number;
+      start: number;
+      end: number;
+      phrase_score: number;
+      token_count: number;
+    }[];
+  } | null;
 }
 
 export function useResults(songId: string) {

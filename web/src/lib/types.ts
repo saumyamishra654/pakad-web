@@ -13,6 +13,7 @@ export interface Song {
   uploadedBy: string;
   visibility: SongVisibility;
   status: SongStatus;
+  processingStep?: string;
   songType: SongType | null;
   createdAt: Date;
   viewCount: number;
@@ -104,6 +105,7 @@ export interface JobStatus {
   id: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   progress: number;
+  step: string;
   songId: string;
   analysisId: string;
   error: string | null;

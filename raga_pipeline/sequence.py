@@ -1740,3 +1740,65 @@ def tokenize_notes_for_lm(
         phrases.append(current_phrase)
 
     return phrases
+
+
+def tokenize_notes_for_lm_with_map(
+    notes: List[Note],
+    tonic_midi: float,
+    phrase_gap_sec: float = 0.25,
+    include_direction: bool = False,
+) -> tuple:
+    """Like ``tokenize_notes_for_lm`` but also returns a note-index map.
+
+    Returns ``(phrases, note_map)`` where *note_map* is a list of
+    ``(phrase_idx, token_idx_in_phrase) -> note_index`` entries, one per
+    non-BOS token.  This allows mapping evidence tokens back to the
+    original notes (and their timestamps).
+    """
+    if not notes:
+        return [], []
+
+    tonic_rounded = int(round(tonic_midi))
+    phrases_result: List[List[str]] = []
+    current_phrase: List[str] = []
+    prev_end: Optional[float] = None
+    prev_midi: Optional[int] = None
+
+    # note_map: list of (phrase_idx, token_idx) -> note_index
+    note_map: List[tuple] = []
+    phrase_idx = 0
+
+    for ni, note in enumerate(notes):
+        if prev_end is None or (note.start - prev_end) > phrase_gap_sec:
+            if current_phrase:
+                phrases_result.append(current_phrase)
+                phrase_idx += 1
+            current_phrase = ["<BOS>"]
+            prev_midi = None
+
+        midi_rounded = int(round(note.pitch_midi))
+        offset = (midi_rounded - tonic_rounded) % 12
+        sargam = OFFSET_TO_SARGAM.get(offset, f"?{offset}")
+        octave_diff = (midi_rounded - tonic_rounded) // 12
+        if octave_diff <= -1:
+            sargam += "'"
+        elif octave_diff >= 1:
+            sargam += "''"
+        if include_direction and prev_midi is not None:
+            if midi_rounded > prev_midi:
+                sargam += "/U"
+            elif midi_rounded < prev_midi:
+                sargam += "/D"
+            else:
+                sargam += "/="
+
+        token_idx = len(current_phrase)
+        current_phrase.append(sargam)
+        note_map.append((phrase_idx, token_idx, ni))
+        prev_midi = midi_rounded
+        prev_end = note.end
+
+    if current_phrase:
+        phrases_result.append(current_phrase)
+
+    return phrases_result, note_map

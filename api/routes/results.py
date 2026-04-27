@@ -287,11 +287,15 @@ async def get_results(
         if Path(f"{art_dir}/{stem_name}.mp3").exists():
             stems[stem_name] = f"/api/results/{song_id}/audio/{stem_name}.mp3"
 
-    # -- Original audio (file uploads only, not YouTube) --
-    if song.get("source") != "youtube":
+    # -- Original audio --
+    # First check artifact dir (pipeline copies original there for all sources)
+    if Path(f"{art_dir}/original.mp3").exists():
+        stems["original"] = f"/api/results/{song_id}/audio/original.mp3"
+    elif song.get("source") != "youtube":
+        # Fallback: check uploads dir for file uploads
         uploaded_by = song.get("uploadedBy", "")
         upload_base = storage.upload_dir(uploaded_by, song_id)
-        for ext in ["*.mp3", "*.wav", "*.flac", "*.m4a"]:
+        for ext in ["*.mp3", "*.wav", "*.flac", "*.m4a", "*.webm", "*.ogg"]:
             original_files = storage.list_files(upload_base, ext)
             if original_files:
                 stems["original"] = f"/api/results/{song_id}/audio/original"
@@ -311,6 +315,9 @@ async def get_results(
     analysis_stats = analysis_meta.get("stats", {})
     correction_summary = analysis_stats.get("correction_summary", {})
     pattern_analysis = analysis_stats.get("pattern_analysis", {})
+
+    # -- LM n-gram evidence --
+    lm_evidence = _read_json(f"{art_dir}/lm_evidence.json")
 
     return {
         "song": {
@@ -339,6 +346,7 @@ async def get_results(
         "transitionMatrix": transition_matrix,
         "correctionSummary": correction_summary,
         "patternAnalysis": pattern_analysis,
+        "lmEvidence": lm_evidence,
     }
 
 
@@ -359,12 +367,17 @@ async def get_audio_file(
     if filename == "original":
         uploaded_by = song.get("uploadedBy", "")
         upload_base = storage.upload_dir(uploaded_by, song_id)
-        for ext in ["*.mp3", "*.wav", "*.flac", "*.m4a"]:
+        mime_map = {
+            ".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
+            ".m4a": "audio/mp4", ".webm": "audio/webm", ".ogg": "audio/ogg",
+        }
+        for ext in ["*.mp3", "*.wav", "*.flac", "*.m4a", "*.webm", "*.ogg"]:
             files = storage.list_files(upload_base, ext)
             if files:
+                suffix = Path(files[0]).suffix.lower()
                 return FileResponse(
                     str(storage.get_absolute_path(files[0])),
-                    media_type="audio/mpeg",
+                    media_type=mime_map.get(suffix, "audio/mpeg"),
                 )
         raise HTTPException(status_code=404, detail="Original audio not found")
 
@@ -416,7 +429,7 @@ async def get_pitch_data(
             status_code=404,
             detail=f"Pitch data not found for stem: {stem}",
         )
-    rows = _read_csv_rows(csv_file, max_rows=50000)
+    rows = _read_csv_rows(csv_file, max_rows=500000)
     points = []
     for row in rows:
         freq = float(row.get("pitch_hz", 0))

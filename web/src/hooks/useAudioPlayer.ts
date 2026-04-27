@@ -13,6 +13,7 @@ export function useAudioPlayer() {
 
   useEffect(() => {
     const audio = new Audio();
+    audio.preload = "auto";
     audio.addEventListener("loadedmetadata", () => setDuration(audio.duration));
     audio.addEventListener("ended", () => setIsPlaying(false));
     audioRef.current = audio;
@@ -46,9 +47,15 @@ export function useAudioPlayer() {
   const loadStem = useCallback((url: string, stem: string) => {
     const audio = audioRef.current;
     if (!audio) return;
+    // Skip reload if already on the same URL
+    if (audio.src && audio.src.endsWith(url)) {
+      setActiveStem(stem);
+      return;
+    }
     const wasPlaying = !audio.paused;
     const time = audio.currentTime;
     audio.src = url;
+    audio.preload = "auto";
     audio.currentTime = time;
     audio.playbackRate = playbackRate;
     setActiveStem(stem);
@@ -59,11 +66,16 @@ export function useAudioPlayer() {
   const pause = useCallback(() => { audioRef.current?.pause(); setIsPlaying(false); }, []);
 
   const seek = useCallback((time: number) => {
-    if (audioRef.current) {
-      audioRef.current.currentTime = time;
-      currentTimeRef.current = time;
-      setCurrentTime(time);
+    const audio = audioRef.current;
+    if (!audio) return;
+    // fastSeek avoids decoding from the nearest keyframe — less lag
+    if (typeof audio.fastSeek === "function") {
+      audio.fastSeek(time);
+    } else {
+      audio.currentTime = time;
     }
+    currentTimeRef.current = time;
+    setCurrentTime(time);
   }, []);
 
   const skip = useCallback((seconds: number) => {

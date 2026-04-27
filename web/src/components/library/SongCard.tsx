@@ -52,7 +52,7 @@ export function SongCard({ song, onDelete }: { song: Song; onDelete?: () => void
           <span className="text-text-faint text-[11px]">
             {new Date(song.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
           </span>
-          <StatusBadge status={song.status} />
+          <StatusBadge status={song.status} step={song.processingStep} />
         </div>
       </div>
     </div>

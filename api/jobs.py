@@ -23,6 +23,7 @@ class Job:
     params: dict
     status: str = "queued"
     progress: float = 0.0
+    step: str = ""
     error: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
@@ -35,9 +36,16 @@ _worker_started = False
 
 def _update_job(job_id: str, **fields) -> None:
     with _lock:
-        if job_id in _jobs:
+        job = _jobs.get(job_id)
+        if job:
             for k, v in fields.items():
-                setattr(_jobs[job_id], k, v)
+                setattr(job, k, v)
+            # Sync step to Firestore so the library UI can show it
+            if "step" in fields:
+                try:
+                    firestore_client.update_song(job.song_id, processingStep=fields["step"])
+                except Exception:
+                    pass
 
 
 def _log(job_id: str, msg: str) -> None:
@@ -70,7 +78,7 @@ def _run_pipeline(job: Job) -> None:
         start_time = params.get("start_time")
         end_time = params.get("end_time")
         _log(job.id, f"[1/4 YouTube Download] Downloading video {video_id} (start={start_time}, end={end_time})...")
-        _update_job(job.id, status="running", progress=0.05)
+        _update_job(job.id, status="running", progress=0.05, step="Downloading audio")
         from raga_pipeline.audio import download_youtube_audio
         try:
             audio_path = download_youtube_audio(
@@ -129,7 +137,7 @@ def _run_pipeline(job: Job) -> None:
             cmd += [flag, str(value)]
 
     # Run detect
-    _update_job(job.id, status="running", progress=0.1)
+    _update_job(job.id, status="running", progress=0.1, step="Running distribution analysis")
     _log(job.id, f"[2/4 Detect] Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
     if result.stdout:
@@ -164,7 +172,7 @@ def _run_pipeline(job: Job) -> None:
     # If no tonic/raga detected, we can't run analyze
     if not detected_tonic or not detected_raga:
         _log(job.id, f"[3/4 Analyze] SKIPPED - no tonic/raga detected. User must specify manually.")
-        _update_job(job.id, progress=0.9)
+        _update_job(job.id, progress=0.9, step="Finalizing")
         firestore_client.update_song(job.song_id, status="complete")
         firestore_client.update_analysis(job.song_id, job.analysis_id,
             status="complete",
@@ -173,7 +181,7 @@ def _run_pipeline(job: Job) -> None:
             artifactPaths={"outputDir": artifact_base})
         return
 
-    _update_job(job.id, progress=0.6)
+    _update_job(job.id, progress=0.6, step="Running structural analysis")
 
     # Build analyze command
     cmd_analyze = ["python", "driver.py", "analyze", "--audio", audio_path, "--output", artifact_base,
@@ -203,7 +211,7 @@ def _run_pipeline(job: Job) -> None:
         raise RuntimeError(f"Analyze failed: {result.stderr[:1000]}")
     _log(job.id, f"[3/4 Analyze] Complete")
 
-    _update_job(job.id, progress=0.9)
+    _update_job(job.id, progress=0.9, step="Finalizing")
 
     # Update Firestore
     _log(job.id, f"[4/4 Finalize] Updating Firestore status -> complete")
@@ -212,6 +220,19 @@ def _run_pipeline(job: Job) -> None:
         status="complete",
         results={"detectedRaga": detected_raga, "detectedTonic": detected_tonic},
         artifactPaths={"outputDir": artifact_base})
+
+    # Copy original audio into the artifact dir so it can be served as "original" track
+    import shutil
+    art_dir_for_original = glob.glob(f"{artifact_base}/**/vocals.mp3", recursive=True)
+    if art_dir_for_original:
+        stem_output_dir = str(Path(art_dir_for_original[0]).parent)
+        original_dest = os.path.join(stem_output_dir, "original.mp3")
+        if not os.path.exists(original_dest):
+            try:
+                shutil.copy2(audio_path, original_dest)
+                _log(job.id, f"[4/4 Finalize] Copied original audio to {original_dest}")
+            except Exception as e:
+                _log(job.id, f"[4/4 Finalize] WARN: failed to copy original audio: {e}")
 
     # Cleanup YouTube temp files
     if source == "youtube":
@@ -226,7 +247,7 @@ def _worker() -> None:
         job = _job_queue.get()
         _log(job.id, f"Job dequeued, starting execution")
         try:
-            _update_job(job.id, status="running", progress=0.0)
+            _update_job(job.id, status="running", progress=0.0, step="Starting")
             _run_pipeline(job)
             _update_job(job.id, status="completed", progress=1.0)
             _log(job.id, f"Job completed successfully")
@@ -268,6 +289,6 @@ def get_job(job_id: str) -> Optional[dict]:
             return None
         return {
             "id": job.id, "songId": job.song_id, "analysisId": job.analysis_id,
-            "status": job.status, "progress": job.progress, "error": job.error,
-            "createdAt": job.created_at,
+            "status": job.status, "progress": job.progress, "step": job.step,
+            "error": job.error, "createdAt": job.created_at,
         }

@@ -8,13 +8,14 @@ const statusConfig: Record<SongStatus, { color: string; label: string }> = {
   failed: { color: "bg-status-error", label: "Error" },
 };
 
-export function StatusBadge({ status, progress }: { status: SongStatus; progress?: number }) {
+export function StatusBadge({ status, progress, step }: { status: SongStatus; progress?: number; step?: string }) {
   const config = statusConfig[status];
+  const label = status === "processing" && step ? step : config.label;
   return (
     <div className="flex items-center gap-1.5">
-      <span className={`w-1.5 h-1.5 rounded-full ${config.color}`} />
+      <span className={`w-1.5 h-1.5 rounded-full ${config.color} ${status === "processing" ? "animate-pulse" : ""}`} />
       <span className={`text-xs ${status === "complete" ? "text-status-success" : status === "failed" ? "text-status-error" : "text-status-warning"}`}>
-        {config.label}
+        {label}
       </span>
       {status === "processing" && progress != null && (
         <div className="ml-1 flex-1 max-w-[60px] bg-bg rounded h-1 overflow-hidden">
