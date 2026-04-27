@@ -42,28 +42,6 @@ cd web && npm install
 pip install -r requirements.txt
 ```
 
-### 2. Firebase configuration
-
-Create a Firebase project at https://console.firebase.google.com:
-- Enable Authentication (Email/Password + Google sign-in)
-- Create a Firestore database (start in test mode)
-- Register a web app and copy the config values
-- Download a service account key JSON
-
-Create `web/.env.local`:
-```
-NEXT_PUBLIC_FIREBASE_API_KEY=your-api-key
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=your-project-id
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your-project.firebasestorage.app
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your-sender-id
-NEXT_PUBLIC_FIREBASE_APP_ID=your-app-id
-```
-
-### 3. Create Firestore indexes
-
-The app requires a composite index on the `songs` collection. On first use, the server logs will contain a link to create it automatically. Click the link and wait 1-2 minutes for it to build.
-
 ## Running locally
 
 Start both servers in separate terminals:
@@ -120,19 +98,6 @@ Open http://localhost:3000
 - Fork public songs with different parameters
 - Public/private visibility toggle
 - Timestamped comments (click to seek audio)
-
-## Production Deployment
-
-```bash
-docker-compose up --build
-```
-
-This starts:
-- FastAPI on port 8765
-- Next.js on port 3000
-- nginx reverse proxy on port 80 (routes `/api/*` to FastAPI, `/*` to Next.js)
-
-See `.env.example` for required environment variables.
 
 ## Pipeline
 
