@@ -638,7 +638,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--silence-threshold",
         type=float,
         default=0.10,
-        help="RMS energy threshold (0.0-1.0) for silence-based phrase splitting. 0 uses the default (0.10).",
+        help="RMS energy threshold (0.0-1.0) for silence-based phrase splitting (default: 0.10). "
+             "Explicitly passing 0 will be treated as unset and fall back to 0.10.",
     )
     analyze_parser.add_argument("--silence-min-duration", type=float, default=0.25, help="Minimum silence duration (seconds) to trigger a phrase break.")
     analyze_parser.add_argument("--phrase-min-duration", type=float, default=0.2, help="Exclude phrases shorter than this duration (seconds).")
