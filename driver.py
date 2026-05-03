@@ -171,13 +171,17 @@ def _transcribe_for_extractor(
     notes = merge_consecutive_notes(notes, max_gap=0.1, pitch_tolerance=0.7,
                                      max_dropout_gap=0.18, dropout_fragment_duration=0.12)
 
-    # Phrase detection + silence split + collapse
+    # Phrase detection + RMS silence split (default) + collapse
     phrases = detect_phrases(notes, max_gap=config.phrase_max_gap,
                               min_length=config.phrase_min_length,
                               min_phrase_duration=config.phrase_min_duration)
     silence_thresh = config.silence_threshold
-    if silence_thresh <= 0 and config.energy_threshold > 0:
+    if config.phrase_split_method == "gap":
+        silence_thresh = 0  # gap-only mode: skip RMS splitting
+    elif silence_thresh <= 0 and config.energy_threshold > 0:
         silence_thresh = config.energy_threshold
+    elif silence_thresh <= 0:
+        silence_thresh = 0.10  # rms mode default when threshold is unset
     if silence_thresh > 0:
         phrases = split_phrases_by_silence(
             phrases=phrases, energy=pitch_data.energy,
@@ -1399,12 +1403,15 @@ def run_pipeline(
         )
         print(f"  Detected {len(results.phrases)} phrases (gap-based)")
 
-        # Silence-based phrase splitting (optional, uses vocal RMS energy)
+        # RMS-based phrase splitting (default method; skipped only when phrase_split_method == 'gap')
         silence_thresh = config.silence_threshold
-        if silence_thresh <= 0 and config.energy_threshold > 0:
-            # Default: reuse the transcription energy threshold so the user
-            # gets silence-aware splitting automatically when energy gating is on.
+        if config.phrase_split_method == "gap":
+            silence_thresh = 0  # gap-only mode: skip RMS splitting
+        elif silence_thresh <= 0 and config.energy_threshold > 0:
+            # Reuse the transcription energy threshold when RMS threshold is unset.
             silence_thresh = config.energy_threshold
+        elif silence_thresh <= 0:
+            silence_thresh = 0.10  # rms mode default when threshold is unset
 
         if silence_thresh > 0 and results.pitch_data_vocals is not None:
             pre_count = len(results.phrases)
@@ -1415,7 +1422,7 @@ def run_pipeline(
                 silence_threshold=silence_thresh,
                 silence_min_duration=config.silence_min_duration,
             )
-            print(f"  Silence split ({silence_thresh:.2f} thresh, "
+            print(f"  RMS silence split ({silence_thresh:.2f} thresh, "
                   f"{config.silence_min_duration:.2f}s min): "
                   f"{pre_count} -> {len(results.phrases)} phrases")
 

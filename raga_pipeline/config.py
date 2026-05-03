@@ -125,12 +125,14 @@ class PipelineConfig:
     phrase_max_gap: float = 1.0           # Max silence between notes in phrase
     phrase_min_length: int = 1            # Minimum notes per phrase
     phrase_min_duration: float = 0.2      # Minimum phrase duration in seconds
+    # Splitting method: 'rms' (default) uses RMS energy to split phrases at silences;
+    # 'gap' uses only note-gap/KMeans detection with no RMS refinement.
+    phrase_split_method: str = "rms"      # 'rms' (default) or 'gap'
 
-    # Silence-based phrase splitting (RMS energy)
-    # When > 0, phrases are additionally split at points where vocal RMS
-    # drops below this fraction of the track's peak energy for at least
-    # silence_min_duration seconds.
-    silence_threshold: float = 0.10       # 0 = disabled; 0.10 = 10% of peak energy
+    # RMS-based phrase splitting parameters (used when phrase_split_method == 'rms')
+    # Phrases are split at points where vocal RMS drops below silence_threshold
+    # (as a fraction of peak energy) for at least silence_min_duration seconds.
+    silence_threshold: float = 0.10       # 10% of peak energy; 0 falls back to this default
     silence_min_duration: float = 0.25    # Min consecutive low-energy seconds to count as silence
 
     # RMS overlay on pitch plots
@@ -626,10 +628,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "log_amp gives better dynamic range for quiet passages.",
     )
     analyze_parser.add_argument(
+        "--phrase-split-method",
+        choices=["gap", "rms"],
+        default="rms",
+        help="Phrase splitting method: 'rms' (default) splits phrases at RMS-detected silences; "
+             "'gap' uses only gap/KMeans-based note-gap detection.",
+    )
+    analyze_parser.add_argument(
         "--silence-threshold",
         type=float,
         default=0.10,
-        help="RMS energy threshold (0.0-1.0) for silence-based phrase splitting. 0 disables.",
+        help="RMS energy threshold (0.0-1.0) for silence-based phrase splitting. 0 uses the default (0.10).",
     )
     analyze_parser.add_argument("--silence-min-duration", type=float, default=0.25, help="Minimum silence duration (seconds) to trigger a phrase break.")
     analyze_parser.add_argument("--phrase-min-duration", type=float, default=0.2, help="Exclude phrases shorter than this duration (seconds).")
@@ -761,8 +770,9 @@ def _config_from_parsed_args(args: argparse.Namespace, parser: argparse.Argument
         pitch_extractor=getattr(args, 'pitch_extractor', 'swiftf0'),
         pitch_hop_ms=getattr(args, 'pitch_hop_ms', 0.0),
         compare_extractors=compare_extractors,
-        silence_threshold=getattr(args, 'silence_threshold', 0.0),
+        silence_threshold=getattr(args, 'silence_threshold', 0.10),
         silence_min_duration=getattr(args, 'silence_min_duration', 0.25),
+        phrase_split_method=getattr(args, 'phrase_split_method', 'rms'),
         phrase_min_duration=getattr(args, 'phrase_min_duration', 0.2),
         phrase_min_length=getattr(args, 'phrase_min_notes', 1),
         show_rms_overlay=not getattr(args, 'no_rms_overlay', False),
