@@ -16,12 +16,13 @@
 | `CHANGELOG.md` | Daily work log - update after every change |
 | `NOTEBOOK_VS_PIPELINE_COMPARISON.md` | Feature comparison with original notebooks |
 | `DOCUMENTATION.md` | User-facing documentation |
+| `../autoresearch_transcription_repo/README.md` | Standalone autonomous transcription-parameter tuning scaffold |
 
 ---
 
 # Raga Pipeline - Quick Reference for LLMs
 
-**Last Updated:** 2026-02-26
+**Last Updated:** 2026-06-11
 
 ## Table of Contents
 
@@ -50,8 +51,10 @@
 3. **Analyze Mode**: Note sequence analysis with known tonic/raga
 
 **Preprocess Ingest Variants:**
-- `--ingest youtube`: requires `--yt`, supports `--start-time/--end-time`.
-- `--ingest record`: supports `--recorded-audio` or interactive CLI mic capture; `tanpura_vocal` mode requires `--tanpura-key`.
+- `--ingest yt`: requires `--yt`, supports `--start-time/--end-time`.
+- `--ingest recording`: supports `--recorded-audio` or interactive CLI mic capture.
+- `--ingest tanpura_recording`: requires `--tanpura-key`; tanpura-assisted recording ingest.
+- Legacy aliases (`youtube`, `record`, `tanpura_vocal`) are normalized to the canonical values above.
 
 **Three Source Types:**
 1. **mixed** (default): Uses stem separation, all tonics considered
@@ -99,6 +102,19 @@
 - **`sequence.py`**: Phrase analysis, clustering, pattern recognition (Motifs, Aroha/Avroha), and aaroh/avroh conformance checking.
 - **`output.py`**: Visualization and HTML report generation.
 - **`batch.py`**: Batch processing script.
+- **`language_model/`**: Per-raga n-gram language models. `NgramModel` stores raw counts per raga (order 1..N), applies add-k smoothing with linear interpolation at scoring time, and serialises to/from JSON. Public API: `add_sequence`, `finalize`, `ragas`, `get_counts`, `vocabulary_size`, `log_prob`, `score_sequence`, `rank_ragas`, `to_dict`, `from_dict`. `train_model(ground_truth, results_dir, output, order, smoothing, smoothing_k, lambdas, min_recordings, transcription_source, quiet)` builds an NgramModel from a labeled corpus: reads GT CSV + discovers transcription CSVs via `motifs._discover_candidates`, tokenizes each recording via `_load_notes_from_csv` -> `sequence.tokenize_notes_for_lm`, prunes ragas below `min_recordings`, and writes a JSON model with provenance metadata. Helpers: `_TONIC_MAP`, `_tonic_name_to_midi(tonic) -> float`, `_load_notes_from_csv(csv_path, tonic_midi) -> List[str]`, `_load_note_timestamps_from_csv(csv_path) -> List[Tuple[float, float]]`. `score_transcription(model_path, transcription_path, tonic, segments, segment_window, top_k, output) -> Dict` loads a trained model JSON, tokenizes the transcription, and returns ranked ragas with scores (`{"rankings": [{"raga", "score", "rank"}, ...]}`). With `segments=True`, slides a token window (50% overlap, size `segment_window`) over the sequence and includes per-segment top-3 raga scores with `start_time`/`end_time`/`token_range`. Optional `output` path writes JSON. Returns `{"error": ...}` when no tokens are extracted. CLI entry point (`raga_pipeline/language_model/__main__.py`): `python -m raga_pipeline.language_model train|score|evaluate ...`. Subcommands: `train` (--gt, --results-dir, --output, --order, --smoothing, --smoothing-k, --min-recordings, --lambdas, --quiet), `score` (--model, --transcription, --tonic, --segments, --segment-window, --top-k, --output), `evaluate` (--gt, --results-dir, --output, --order, --smoothing, --smoothing-k, --min-recordings, --lambdas, --sweep-orders, --quiet). `main(argv)` returns int exit code (0 = success). `_build_parser()` creates the argparse tree; `_parse_lambdas(raw, order)` converts a comma-separated string to a float list, raising `ValueError` on wrong count. Tests in `tests/test_lm_cli.py`. `evaluate_model(ground_truth, results_dir, output, order, smoothing, smoothing_k, lambdas, min_recordings, transcription_source, sweep_orders, quiet) -> Dict` runs leave-one-out cross-validation: tokenizes all recordings once, then for each held-out recording builds a fresh NgramModel from all others (pruning ragas below `min_recordings` within the fold) and scores via `rank_ragas`. Returns summary with `top1_accuracy`, `top3_accuracy`, `mrr`, `total`; with `sweep_orders` also includes `"sweep_results"` list of per-order dicts. Writes per-recording CSV via `_write_eval_csv` (columns: filename, true_raga, predicted_raga, correct, true_raga_rank, score_top1/2/3, raga_top1/2/3). Helpers: `_run_leave_one_out`, `_compute_summary`, `_write_eval_csv`.
+
+**Offline Experiment Scripts (`scripts/`):**
+- **`sweep_saturation_calibration.py`** (Exp 16): Replays histogram scorer on cached pitch CSVs, sweeps fit-score calibration variants (clip thresholds, band-pass weights). Resume-safe `results/saturation_calibration/progress.csv`.
+- **`sweep_truncation.py`** (Exp 15): Slices cached pitch/transcription CSVs to time windows, evaluates tonic detection + LM raga accuracy per window. Resume-safe `results/truncation_sweep/progress.csv`.
+- **`sweep_confusion_pairs.py`**: Builds confusion-pair diagnostics from a calibration progress CSV -- confusion matrix and top confused raga pairs.
+- **`sweep_positional_pch.py`** (Exp 18): Evaluates three positional pitch-class histogram features (nyas/phrase-ending, phrase-start, octave-stratified 36-dim) as standalone raga discriminators via LOO cosine similarity. Sweeps `phrase_gap_sec`. Reports GT-tonic and detected-tonic accuracy. Resume-safe `results/positional_pch/progress.csv`.
+- **`sweep_gmm_fingerprint.py`** (Exp 20): Extracts per-swara within-note features (width, shruti offset, skew) from raw f0 frames and GMM fits. 60 features (5 per PC x 12 PCs): `dev_frame`, `sigma_frame`, `frame_count` (frame-level) + `sigma_hist`, `dev_hist`, `skew_hist` (GMM). C1: Welch t-test + BH correction on confused pairs from `results/confusion_analysis/top_pairs.csv`. C2 (conditional on C1 significance): LOO weighted-distance classification using `exp(-distance)` similarity. Resume-safe `results/gmm_fingerprint/fingerprints.csv`.
+- **`sweep_cadence_lm.py`** (Exp 21): Trains per-raga trigram LM on cadential phrases only (last 4 notes before each return to Sa). LOO evaluation with token-count-based model tier selection (trigram >= 20 tokens, bigram backoff 10-20 tokens, skip < 10). Outputs top-1/top-3 accuracy and cadence trigram examples. Resume-safe `results/cadence_lm/progress.csv`.
+- **`sweep_pipeline_loo.py`** (Exp 23, 23b, 24): Full pipeline LOO: histogram + n-gram LM + combined scoring. Supports `--stems-root`, `--transcription-root` (separate pitch/transcription dirs), `--train-corrected` (apply GT raga correction to training data). Exp 23b uses `--stems-root nocorrection` for verified uncorrected baseline (88.9% best result).
+- **`sweep_perhyp_v2_loo.py`** (Exp 26): Per-hypothesis correction LOO. Corrects uncorrected transcription under each candidate raga, scores with corrected-trained LM. Penalty terms: W_DEL, W_SNAP. Result: 85.5% (beaten by simpler Exp 23b).
+- **`sweep_alignment_loo.py`** (Exp 28): Noisy-channel alignment LM with beam DP. Corrected-train, uncorrected-test. Key finding: sub_fraction is discriminative, not lm_per_token. Best: 66.7%.
+- **`sweep_top3_rerank_loo.py`** (Exp 29): Top-K histogram candidates at detected/given tonic, per-hyp corrected, LM rerank. Auto 70.7%, given 72.7%. Negative result: top-3 too aggressive.
 
 **Other Directories:**
 - **`pretrained_models/`**: Stores ML models/weights for scoring.
@@ -109,6 +125,8 @@
   - Report serving rewrites relative asset links to `/local-files/...`; large embedded `data:` URIs are fast-skipped during rewrite to keep analyze report loads stable.
   - Analyze workspace includes an embedded analyze-report iframe plus in-app transcription editor (versioned save/load/default/regenerate/delete) driven by `/api/transcription-edits/...`.
   - The editor initializes from report metadata payload (`analysis_report.meta.json` -> `transcription_edit_payload`) via `/api/transcription-edits/{dir_token}/{report_name}/base`; legacy reports without this payload require rerunning analyze.
+- **`autoresearch_transcription_repo/`**: Contains both (a) Optuna sweep mode (`run_study.py`, `src/autoresearch_tuner/study.py`) and (b) true LLM autoresearch mode (`run_llm_autoresearch.py`, `src/autoresearch_tuner/llm_loop.py`) that performs propose-evaluate-keep/discard iteration using `program.md` instructions and JSON parameter proposals from a chat-completions API endpoint. Both modes use analyze `--transcription-only --skip-raga-correction` evaluation via the shared evaluator. Fixed reusable prompt also lives at `autoresearch_transcription_repo/prompts/system_prompt.md`.
+- **Raga correction logging toggle:** `get_raga_notes(...)` in `raga_pipeline/raga.py` now prints per-recording raga-match info only when `RAGA_LOG_RAGA_MATCHES=1` is set. Default behavior is silent to avoid log spam in long batch/tuning runs.
 
 ---
 
@@ -191,13 +209,13 @@ Edit in `transcription.py` when changing:
 - snapping behavior (chromatic/raga modes, bias-adjusted pitch)
 
 Edit in `sequence.py` when changing:
-- phrase detection and silence splitting
+- phrase detection (RMS silence primary, gap fallback)
 - phrase clustering and transition matrix prep
 - motif/directional pattern analysis and aaroh/avroh conformance checks
 
 Key anchors:
 - `transcribe_to_notes(...)`, `detect_stationary_events(...)`
-- `detect_phrases(...)`, `split_phrases_by_silence(...)`, `analyze_raga_patterns(...)`
+- `detect_phrases_by_silence(...)` (primary when `phrase_method=rms`), `detect_phrases(...)` (gap fallback), `analyze_raga_patterns(...)`
 
 ### F) HTML reports, plots, and interactive frontend behavior
 
@@ -286,13 +304,13 @@ stationary_note_histogram_duration_weighted.png / .csv (octave-wrapped 12-note d
     ↓                       ↓
 HistogramData           List[Note]
     ↓                       ↓
-detect_peaks            detect_phrases
+detect_peaks            detect_phrases_by_silence (default, phrase_method=rms)
+    ↓                       OR detect_phrases (gap fallback / --phrase-method gap)
+PeakData                    ↓
+ pitch_classes (Set)     List[Phrase]
     ↓                       ↓
-PeakData                List[Phrase]
- pitch_classes (Set)        ↓
-    ↓                   split_phrases_by_silence (optional, RMS)
-generate_candidates         ↓
-    ↓                   cluster_phrases
+generate_candidates     cluster_phrases
+    ↓
 List[Candidate]             ↓
     ↓                   compute_transition_matrix
 List[Candidate]             ↓
@@ -344,10 +362,9 @@ pd.DataFrame (ranked)       ↓
 |-------|---------|-------------|
 | `output_dir` | `"batch_results"` | Parent output directory (stems/reports written under `<output>/<engine>/<audio_filename>/`) |
 | `mode` | `"detect"` | `"preprocess"`, `"detect"`, or `"analyze"` |
-| `preprocess_ingest` | `"youtube"` | `"youtube"` or `"record"` (preprocess only) |
-| `preprocess_record_mode` | `"song"` | `"song"` or `"tanpura_vocal"` (record ingest only) |
-| `preprocess_tanpura_key` | `None` | Canonical tanpura key (`A,Bb,B,C,Db,D,Eb,E,F,Gb,G,Ab`) |
-| `preprocess_recorded_audio` | `None` | Existing recording path; if omitted in record ingest, CLI captures mic audio |
+| `preprocess_ingest` | `None` (required in preprocess) | `"yt"`, `"recording"`, or `"tanpura_recording"` |
+| `preprocess_tanpura_key` | `None` | Canonical tanpura key (`A,Bb,B,C,Db,D,Eb,E,F,Gb,G,Ab`); required for `tanpura_recording` |
+| `preprocess_recorded_audio` | `None` | Existing recording path; if omitted in `recording`/`tanpura_recording` ingest, CLI captures mic audio |
 | `source_type` | `"mixed"` | `"mixed"`, `"instrumental"`, `"vocal"` |
 | `melody_source` | `"separated"` | `"separated"`, `"composite"` (use original mix for melody) |
 | `vocalist_gender` | `None` | `"male"`, `"female"` (for vocal source) |
@@ -356,6 +373,8 @@ pd.DataFrame (ranked)       ↓
 | `tonic_override` | `None` | Optional tonic constraint. Detect mode accepts comma-separated tonics. |
 | `raga_override` | `None` | Optional raga constraint in detect; required in analyze. |
 | `use_ml_model` | `False` | ML scoring disabled by default |
+| `use_lm_scoring` | `True` | N-gram LM re-ranking enabled by default in detect mode |
+| `lm_skip_correction` | `True` | Score chromatic transcription without per-hypothesis raga correction (matches uncorrected training) |
 
 If `vocalist_gender` is provided via CLI, `source_type` is auto-set to `vocal`.
 
@@ -455,6 +474,14 @@ OFFSET_TO_SARGAM = {
 }
 ```
 
+#### `tokenize_notes_for_lm(notes, tonic_midi, phrase_gap_sec=0.25, include_direction=False, phrases=None) -> List[List[str]]`
+- **Purpose:** Shared tokenizer for n-gram language models. Converts notes to octave-marked sargam tokens with `<BOS>` phrase boundaries.
+- **Token format:** middle octave = bare (`Sa`, `Re`); one below = `'` suffix (`Ni'`); one above = `''` suffix (`Sa''`); extremes clipped to boundary octave.
+- **Phrase boundaries (two modes):**
+  - If `phrases` (`List[Phrase]`) is provided: uses pre-computed phrase boundaries directly. `notes` and `phrase_gap_sec` are ignored.
+  - Otherwise: gaps > `phrase_gap_sec` (default 0.25 s) between consecutive notes insert a `<BOS>` token.
+- **Empty input:** returns `[]`.
+
 #### `analyze_raga_patterns(phrases, tonic, expected_aaroh=None, expected_avroh=None)`
 - **Purpose:** Comprehensive pattern aggregator (Motifs + Aaroh/Avroh runs).
 - **Checker Integration:** If expected directional vectors are provided, adds `aaroh_avroh_checker` results to pattern output.
@@ -468,10 +495,17 @@ OFFSET_TO_SARGAM = {
 - `load_aaroh_avroh_patterns(csv_path)`: Parses textual Aroha/Avroh notation into 12-note directional vectors.
 - `get_aaroh_avroh_pattern_for_raga(raga_name, pattern_lookup)`: Resolves expected pattern for detected raga name.
 
-#### `split_phrases_by_silence(phrases, energy, timestamps, silence_threshold, silence_min_duration)`
-- **Purpose:** Re-split existing phrases at points where vocal RMS drops below `silence_threshold` for at least `silence_min_duration` seconds.
-- **When used:** After `detect_phrases()`, controlled by `config.silence_threshold`.
-- **Default:** Analyze CLI default is `0.10`; if set to `0`, the pipeline can fall back to `energy_threshold` when that is set.
+#### `detect_phrases_by_silence(notes, energy, timestamps, silence_threshold, silence_min_duration, min_phrase_duration, min_notes_in_phrase)`
+- **Purpose:** Primary phrase detection using RMS energy silence regions. Takes flat `List[Note]` and returns `List[Phrase]`.
+- **When used:** Default phrase method (`config.phrase_method == "rms"`) when energy data is available and `silence_threshold > 0`.
+- **Fallback:** If energy is unavailable, `silence_threshold <= 0`, or `--phrase-method gap`, driver uses gap-based `detect_phrases()` instead.
+- **Default:** `silence_threshold=0.10`, `silence_min_duration=0.25`, `min_phrase_duration=0.2`, `min_notes_in_phrase=1`.
+
+#### `detect_phrases(notes, max_gap, min_length, min_phrase_duration)`
+- **Purpose:** Legacy inter-note gap phrase detection (KMeans on temporal gaps).
+- **When used:** Fallback when RMS silence detection is inactive (`--phrase-method gap`, missing energy, or `silence_threshold <= 0`).
+
+*Historical note:* An older two-stage flow (`detect_phrases` then `split_phrases_by_silence`) was replaced by the single dispatch above. `split_phrases_by_silence` is being removed as dead code.
 
 ---
 
@@ -527,7 +561,33 @@ python -m raga_pipeline.batch /path/to/audio/dir
 
 ---
 
-### 8. Configuration Parameters (Current Defaults)
+### 8. Language Model for Raga Detection
+
+N-gram language model approach to raga classification (`raga_pipeline/language_model/`). Builds per-raga probability distributions over sargam token sequences, classifies by perplexity.
+
+**Production model:** `raga_pipeline/models/compmusic_ngram_model.json` -- order=7, 30 ragas, trained on all 297 CompMusic recordings from uncorrected transcriptions (`separated_stems_nocorrection`). **Enabled by default** (`use_lm_scoring=True`, `lm_skip_correction=True` in `config.py`). LM re-ranking runs as Step 5.5 in detect mode and updates `results.detected_raga` with the combined top-1 raga. Model auto-discovered by `config._find_lm_model_path()`.
+
+**Token format:** Octave-marked sargam: `Sa`, `Re'` (lower octave), `Ga''` (upper octave), with `<BOS>` at phrase boundaries. Shared tokenizer: `sequence.py:tokenize_notes_for_lm(notes, tonic_midi, phrase_gap_sec, phrases=None)`. When `phrases` (pre-computed `List[Phrase]`) is passed, phrase boundaries come from the pipeline's phrase detection (e.g. `detect_phrases_by_silence`) instead of the 0.25s gap heuristic.
+
+**CLI:**
+```bash
+python -m raga_pipeline.language_model train --gt gt.csv --results-dir results/ --output model.json
+python -m raga_pipeline.language_model score --model model.json --transcription notes.csv --tonic C#
+python -m raga_pipeline.language_model evaluate --gt gt.csv --results-dir results/ --sweep-orders 2,3,4,5,6
+```
+
+**Key classes/functions:**
+- `NgramModel`: per-raga n-gram counts, add-k smoothing, interpolated scoring, JSON serialization
+- `alignment.py`: Noisy-channel alignment scorer. Token utilities: `token_pitch_info(token)` extracts `(pitch_class, octave)`, `pitch_distance()` computes circular semitone distance, `build_substitution_map(vocab, max_distance)` pre-computes substitution pairs. Beam DP scorer: `score_phrase_aligned(model, raga, phrase, config, sub_map)` and `score_sequence_aligned(model, raga, phrases, config, sub_map)` score noisy sequences against a trained LM via beam-search DP with skip/substitution costs. Configured via `AlignmentConfig(lambda_skip, lambda_sub, beam_width, max_sub_distance)`. Returns `AlignmentResult(lm_per_token, n_matched, n_skipped, n_substituted, skip_fraction, total_sub_distance, raw_lm_sum)`.
+- `NgramModel.vocabulary` (property): public access to the `_vocabulary` set
+- `NgramModel.remove_raga(raga)`: removes a raga from all internal count dicts (for LOO evaluation)
+- `train_model()`: corpus-level training from GT CSV + transcription CSVs (reuses `motifs.py` candidate discovery)
+- `score_transcription()`: single-recording scoring with optional segment-level confidence curves
+- `evaluate_model()`: leave-one-out cross-validation with order sweep
+
+---
+
+### 9. Configuration Parameters (Current Defaults)
 
 ```python
 # Note detection
@@ -548,6 +608,7 @@ silence_threshold = 0.10        # Analyze-mode default RMS threshold (0-1)
 silence_min_duration = 0.25     # Min consecutive seconds of silence for a break
 
 # Phrase filtering
+phrase_method = "rms"           # "rms" (energy-based silence detection) or "gap" (legacy inter-note gap)
 phrase_min_duration = 0.2       # Exclude phrases shorter than this duration (seconds)
 phrase_min_length = 1           # Exclude phrases with fewer notes than this count
 

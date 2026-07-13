@@ -1,5 +1,7 @@
 # Notebook vs Python Pipeline - Comprehensive Analysis Comparison
 
+> **Stale-document notice:** Historical document, last verified 2026-01-17. Several claims below are outdated. See `LLM_REFERENCE.md` for the current pipeline state.
+
 **Purpose:** Detailed comparison of analyses performed in the original Jupyter notebooks versus the Python pipeline implementation.
 
 **Last Updated:** 2026-01-17
@@ -53,8 +55,8 @@ Based on examination of both notebooks and the Python pipeline, analyses fall in
 - Phrase detection
 - Transition matrices
 
-### Category 3: Advanced Pattern Analysis (NOT IMPLEMENTED)
-- Aaroh/Avroh (ascending/descending) pattern extraction
+### Category 3: Advanced Pattern Analysis (PARTIALLY IMPLEMENTED)
+- Aaroh/Avroh conformance checking (`check_aaroh_avroh_conformance`) -- implemented; deeper notebook-style pattern frequency mining -- partial
 - Melodic sequence clustering
 - Raga-corrected note filtering
 - Phrase clustering by similarity
@@ -407,7 +409,7 @@ def apply_raga_correction_to_notes(note_sequence, raga_df, raga_name,
 
 ---
 
-#### 8. **Aaroh/Avroh Pattern Extraction**
+#### 8. **Aaroh/Avroh Pattern Extraction and Conformance**
 **Notebook Implementation:**
 ```python
 def analyze_aaroh_avroh(aaroh_patterns, avroh_patterns, top_n=10):
@@ -417,10 +419,10 @@ def analyze_aaroh_avroh(aaroh_patterns, avroh_patterns, top_n=10):
     # Identifies characteristic raga phrases
 ```
 
-**Python Pipeline:** ❌ **NOT IMPLEMENTED**
-- **Impact:** HIGH - Important for raga characterization
-- **Status:** Completely missing from pipeline
-- **Recommendation:** Implement in `sequence.py` as new module
+**Python Pipeline:** ✅ **IMPLEMENTED** (conformance checking; partial pattern aggregation)
+- Location: `sequence.py::check_aaroh_avroh_conformance()`, integrated via `analyze_raga_patterns()` and `raga.py` aaroh/avroh DB utilities
+- **Status:** Analyze reports include aaroh/avroh checker summaries when reference patterns exist
+- **Gap vs notebook:** Full notebook-style frequency mining of aaroh/avroh runs may still differ in depth
 
 ---
 
@@ -741,7 +743,7 @@ plot_note_segments(...)
 | Transition Matrix | ❌ | ✅ | ✅ | COMPLETE |
 | Raga Note Snapping | ❌ | ✅ | ✅ | COMPLETE |
 | **Advanced Pattern Analysis** | | | | |
-| Aaroh/Avroh Extraction | ❌ | ✅ | ❌ | **MISSING** |
+| Aaroh/Avroh Extraction | ❌ | ✅ | ✅ | CONFORMANCE IMPLEMENTED |
 | Melodic Sequences | ❌ | ✅ | ❌ | **MISSING** |
 | Common Patterns | ❌ | ✅ | ❌ | **MISSING** |
 | Phrase Clustering | ❌ | ✅ | ⚠️ | VERIFY |
@@ -768,14 +770,12 @@ plot_note_segments(...)
 
 ### High Priority (Recommended for Implementation)
 
-#### 1. **Aaroh/Avroh Pattern Extraction**
-**Importance:** Very High  
-**Location:** Should be in `sequence.py`  
+#### 1. **Aaroh/Avroh Pattern Extraction (deeper mining)**
+**Importance:** Medium (conformance checking already exists)  
+**Location:** Extend `sequence.py` / `analyze_raga_patterns()`  
 **Functionality:**
-- Extract ascending pitch sequences (aaroh)
-- Extract descending pitch sequences (avroh)
-- Frequency analysis of patterns
-- Identify characteristic raga phrases
+- Richer frequency analysis of aaroh/avroh runs beyond the current conformance checker
+- Notebook-style top-N pattern tables
 
 **Notebook Reference:** `note_sequence_playground.ipynb::analyze_aaroh_avroh()`
 
@@ -977,9 +977,9 @@ prominence_low_factor = 0.01   # Same
 
 ### Medium-Term Additions (1 month)
 
-8. **Implement Aaroh/Avroh Analysis**
-   - Create new functions in `sequence.py`
-   - Add visualization support
+8. **Extend Aaroh/Avroh Analysis**
+   - Build on existing `check_aaroh_avroh_conformance()` / `analyze_raga_patterns()`
+   - Add richer notebook-style frequency tables if needed
 
 9. **Create Comprehensive Pattern Analysis Module**
    - New file: `raga_pattern_analysis.py`
@@ -1030,7 +1030,7 @@ prominence_low_factor = 0.01   # Same
 ### Known Missing ❌
 
 1. Pareto filtering
-2. Aaroh/Avroh extraction
+2. Deeper aaroh/avroh frequency mining (conformance checker exists)
 3. Melodic sequence analysis
 4. Pattern frequency analysis
 5. Octave range filtering
@@ -1062,7 +1062,7 @@ prominence_low_factor = 0.01   # Same
 
 The Python pipeline is **production-ready for histogram-based raga detection** but **needs significant work for advanced sequence analysis**. Prioritize implementing:
 
-1. Aaroh/Avroh pattern extraction
+1. Deeper aaroh/avroh pattern mining (conformance already implemented)
 2. Melodic sequence and pattern analysis
 3. Pareto filtering
 4. Parameter verification and alignment

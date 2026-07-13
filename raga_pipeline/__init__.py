@@ -72,7 +72,7 @@ except Exception:
     pass
 
 try:
-    from .sequence import Note, Phrase, cluster_phrases, compute_transition_matrix, detect_notes, detect_phrases
+    from .sequence import Note, Phrase, cluster_phrases, compute_transition_matrix, detect_phrases
 
     __all__.extend(
         [
@@ -80,7 +80,6 @@ try:
             "Phrase",
             "cluster_phrases",
             "compute_transition_matrix",
-            "detect_notes",
             "detect_phrases",
         ]
     )

@@ -7,8 +7,8 @@ output format remains stable as the contract between modules.
 
 Provides:
 - Note, Phrase: Data containers
-- detect_notes: Main note detection entry point
-- detect_phrases: Group notes into phrases
+- detect_phrases_by_silence: Primary RMS-based phrase detection
+- detect_phrases: Gap-based phrase detection (legacy fallback)
 - cluster_phrases: Group similar phrases (motifs)
 - compute_transition_matrix: Sargam bigram statistics
 - midi_to_sargam: MIDI to Indian classical notation
@@ -254,42 +254,6 @@ class Phrase:
 # =============================================================================
 # NOTE DETECTION
 # =============================================================================
-
-def detect_notes(
-    pitch_data: PitchData,
-    config: PipelineConfig,
-) -> List[Note]:
-    """
-    Main note detection entry point.
-    
-    Currently uses stationary point detection. This implementation
-    will be updated with new methods, but the output format remains stable.
-    
-    Args:
-        pitch_data: PitchData from pitch extraction
-        config: Pipeline configuration
-        
-    Returns:
-        List of Note objects
-    """
-    # Smooth pitch contour
-    smoothed = smooth_pitch_contour(
-        pitch_data,
-        method=config.smoothing_method,
-        sigma=config.smoothing_note_sigma,
-        snap_to_semitones=config.snap_to_semitones,
-    )
-    
-    # Detect notes using stationary point method
-    notes = detect_stationary_points(
-        smoothed,
-        min_duration=config.note_min_duration,
-        pitch_threshold=config.pitch_change_threshold,
-        derivative_threshold=config.derivative_threshold,
-    )
-    
-    return notes
-
 
 def smooth_pitch_contour(
     pitch_data: PitchData,
@@ -740,105 +704,119 @@ def merge_consecutive_notes(
     return merged
 
 
-def split_phrases_by_silence(
-    phrases: List[Phrase],
+def detect_phrases_by_silence(
+    notes: List[Note],
     energy: np.ndarray,
     timestamps: np.ndarray,
-    silence_threshold: float = 0.05,
+    silence_threshold: float = 0.10,
     silence_min_duration: float = 0.25,
+    min_phrase_duration: float = 0.2,
+    min_notes_in_phrase: int = 1,
 ) -> List[Phrase]:
     """
-    Re-split existing phrases at points where vocal RMS energy drops below a
-    threshold for a sustained period.  This captures breath pauses and rests
-    that gap-based splitting may miss when the pitch tracker keeps voicing
-    active through low-energy regions.
+    Primary phrase detection using RMS energy silence regions.
+
+    Scans the energy track for sustained silence (energy < silence_threshold
+    for >= silence_min_duration seconds), uses silence midpoints as phrase
+    boundaries, and groups notes accordingly.
 
     Args:
-        phrases: Pre-detected phrases (from gap-based detection).
+        notes: Flat list of Note objects, sorted by start time.
         energy: Full-length normalised RMS array aligned to *timestamps*.
         timestamps: Full-length time axis matching *energy*.
         silence_threshold: Fraction of peak energy below which a frame is
-            considered silent (e.g. 0.05 = 5 %).
-        silence_min_duration: Minimum consecutive seconds of silence required
-            to trigger a phrase break.
+            silent (e.g. 0.10 = 10%). 0 disables splitting.
+        silence_min_duration: Minimum consecutive seconds of silence to
+            trigger a phrase break.
+        min_phrase_duration: Drop phrases shorter than this (seconds),
+            merging into neighbour.
+        min_notes_in_phrase: Drop phrases with fewer notes, merging into
+            neighbour.
 
     Returns:
-        New list of Phrase objects with additional splits inserted.
+        List of Phrase objects.
     """
+    if not notes:
+        return []
+
     if silence_threshold <= 0 or len(energy) == 0 or len(timestamps) == 0:
-        return phrases
+        return [Phrase(notes=list(notes))]
 
     length = min(len(energy), len(timestamps))
     energy = np.asarray(energy[:length], dtype=float)
     ts = np.asarray(timestamps[:length], dtype=float)
 
-    # Boolean mask: True where energy is below the threshold
+    # --- Find silence regions across the full track ---
     is_silent = energy < silence_threshold
 
-    new_phrases: List[Phrase] = []
+    silent_indices = np.where(is_silent)[0]
+    if len(silent_indices) == 0:
+        return [Phrase(notes=list(notes))]
 
-    for phrase in phrases:
-        if len(phrase.notes) < 2:
-            new_phrases.append(phrase)
+    # Group consecutive silent indices into runs
+    breaks_in_silence = np.where(np.diff(silent_indices) > 1)[0]
+    runs: list = []
+    run_start = 0
+    for b in breaks_in_silence:
+        runs.append((silent_indices[run_start], silent_indices[b]))
+        run_start = b + 1
+    runs.append((silent_indices[run_start], silent_indices[-1]))
+
+    # Keep runs >= silence_min_duration, compute midpoints as split boundaries
+    split_times: List[float] = []
+    for ri, rf in runs:
+        if ts[rf] - ts[ri] >= silence_min_duration:
+            split_times.append((ts[ri] + ts[rf]) / 2.0)
+
+    if not split_times:
+        return [Phrase(notes=list(notes))]
+
+    split_times.sort()
+
+    # --- Assign notes to segments between split boundaries ---
+    # Boundaries: [-inf, split_times[0], split_times[1], ..., +inf]
+    raw_groups: List[List[Note]] = [[] for _ in range(len(split_times) + 1)]
+    for note in notes:
+        note_mid = (note.start + note.end) / 2.0
+        # Binary search for the segment
+        seg = 0
+        for st in split_times:
+            if note_mid >= st:
+                seg += 1
+            else:
+                break
+        raw_groups[seg].append(note)
+
+    # Drop empty groups
+    raw_groups = [g for g in raw_groups if g]
+
+    if not raw_groups:
+        return [Phrase(notes=list(notes))]
+
+    # --- Post-processing: merge runts ---
+    def _group_duration(g: List[Note]) -> float:
+        return g[-1].end - g[0].start if g else 0.0
+
+    final_groups: List[List[Note]] = []
+    i = 0
+    while i < len(raw_groups):
+        g = raw_groups[i]
+        dur = _group_duration(g)
+        if dur < min_phrase_duration or len(g) < min_notes_in_phrase:
+            # Merge into next neighbour if available, else previous
+            if i + 1 < len(raw_groups):
+                raw_groups[i + 1] = g + raw_groups[i + 1]
+            elif final_groups:
+                final_groups[-1] = final_groups[-1] + g
+            # else: single runt with no neighbours, keep it
+            else:
+                final_groups.append(g)
+            i += 1
             continue
+        final_groups.append(g)
+        i += 1
 
-        # Find silence regions that fall *within* this phrase's time span
-        p_start = phrase.notes[0].start
-        p_end = phrase.notes[-1].end
-
-        # Indices in the global time array that overlap with this phrase
-        mask = (ts >= p_start) & (ts <= p_end) & is_silent
-
-        if not np.any(mask):
-            new_phrases.append(phrase)
-            continue
-
-        # Detect contiguous silent runs that exceed min duration
-        silent_indices = np.where(mask)[0]
-        if len(silent_indices) == 0:
-            new_phrases.append(phrase)
-            continue
-
-        # Group consecutive indices
-        breaks_in_silence = np.where(np.diff(silent_indices) > 1)[0]
-        runs: list = []
-        run_start = 0
-        for b in breaks_in_silence:
-            runs.append((silent_indices[run_start], silent_indices[b]))
-            run_start = b + 1
-        runs.append((silent_indices[run_start], silent_indices[-1]))
-
-        # Keep only runs whose duration >= silence_min_duration
-        split_times: List[float] = []
-        for ri, rf in runs:
-            dur = ts[rf] - ts[ri]
-            if dur >= silence_min_duration:
-                # Use the midpoint of the silence region as the split point
-                split_times.append((ts[ri] + ts[rf]) / 2.0)
-
-        if not split_times:
-            new_phrases.append(phrase)
-            continue
-
-        # Split the phrase's note list at each split_time
-        remaining_notes = list(phrase.notes)
-        for st in sorted(split_times):
-            left: List[Note] = []
-            right: List[Note] = []
-            for n in remaining_notes:
-                mid = (n.start + n.end) / 2.0
-                if mid < st:
-                    left.append(n)
-                else:
-                    right.append(n)
-            if left:
-                new_phrases.append(Phrase(notes=left))
-            remaining_notes = right
-
-        if remaining_notes:
-            new_phrases.append(Phrase(notes=remaining_notes))
-
-    return new_phrases
+    return [Phrase(notes=g) for g in final_groups if g]
 
 
 def detect_phrases(
@@ -1665,11 +1643,50 @@ def cluster_notes_into_phrases(
 # LM TOKENIZER
 # =============================================================================
 
+def _tokenize_note(
+    note: Note,
+    tonic_rounded: int,
+    include_direction: bool,
+    prev_midi: Optional[int],
+) -> Tuple[str, int]:
+    """Convert a single Note to a sargam LM token.
+
+    Returns:
+        (token_string, midi_rounded) -- the token and the rounded MIDI
+        value for direction tracking.
+    """
+    midi_rounded = int(round(note.pitch_midi))
+    offset = (midi_rounded - tonic_rounded) % 12
+    sargam = OFFSET_TO_SARGAM.get(offset, f"?{offset}")
+
+    # Tonic-relative octave: how many octaves above/below the tonic
+    octave_diff = (midi_rounded - tonic_rounded) // 12
+
+    # Clip to [-1, +1] range
+    if octave_diff <= -1:
+        sargam += "'"
+    elif octave_diff >= 1:
+        sargam += "''"
+    # else: middle octave, bare sargam
+
+    # Direction suffix
+    if include_direction and prev_midi is not None:
+        if midi_rounded > prev_midi:
+            sargam += "/U"
+        elif midi_rounded < prev_midi:
+            sargam += "/D"
+        else:
+            sargam += "/="
+
+    return sargam, midi_rounded
+
+
 def tokenize_notes_for_lm(
     notes: List[Note],
     tonic_midi: float,
     phrase_gap_sec: float = 0.25,
     include_direction: bool = False,
+    phrases: Optional[List["Phrase"]] = None,
 ) -> List[List[str]]:
     """Convert note list to phrase-separated LM token sequences.
 
@@ -1682,123 +1699,64 @@ def tokenize_notes_for_lm(
           ``/U`` = ascending from previous note, ``/D`` = descending,
           ``/=`` = same pitch.  First note after ``<BOS>`` has no direction.
 
-    Phrase boundaries (gaps > *phrase_gap_sec* between consecutive notes)
-    start a new phrase. Each phrase begins with a ``<BOS>`` token.
-    N-grams should be counted within phrases only -- never crossing
-    phrase boundaries.
+    Phrase boundaries are determined by one of two methods:
+
+    1. If *phrases* is provided (``List[Phrase]``), each Phrase object
+       defines a phrase boundary.  The *notes* and *phrase_gap_sec*
+       parameters are ignored.
+    2. Otherwise, gaps > *phrase_gap_sec* between consecutive notes in
+       *notes* start a new phrase.
+
+    Each phrase begins with a ``<BOS>`` token.  N-grams should be counted
+    within phrases only -- never crossing phrase boundaries.
 
     Returns:
         List of phrase token lists, e.g.
         ``[['<BOS>', 'Sa', 'Re/U', 'Ga/U'], ['<BOS>', 'Ni\\'', 'Re/U', ...]]``
     """
+    # --- Pre-computed phrases path ---
+    if phrases is not None:
+        tonic_rounded = int(round(tonic_midi))
+        result: List[List[str]] = []
+        for phrase in phrases:
+            if not phrase.notes:
+                continue
+            tokens: List[str] = ["<BOS>"]
+            prev_midi: Optional[int] = None
+            for note in phrase.notes:
+                tok, prev_midi = _tokenize_note(
+                    note, tonic_rounded, include_direction, prev_midi,
+                )
+                tokens.append(tok)
+            result.append(tokens)
+        return result
+
+    # --- Flat note list path (gap-based phrase detection) ---
     if not notes:
         return []
 
     tonic_rounded = int(round(tonic_midi))
 
-    phrases: List[List[str]] = []
+    token_phrases: List[List[str]] = []
     current_phrase: List[str] = []
     prev_end: Optional[float] = None
-    prev_midi: Optional[int] = None
+    prev_midi_val: Optional[int] = None
 
     for note in notes:
         # Start a new phrase on gap or at start
         if prev_end is None or (note.start - prev_end) > phrase_gap_sec:
             if current_phrase:
-                phrases.append(current_phrase)
+                token_phrases.append(current_phrase)
             current_phrase = ["<BOS>"]
-            prev_midi = None  # reset direction at phrase boundary
+            prev_midi_val = None  # reset direction at phrase boundary
 
-        midi_rounded = int(round(note.pitch_midi))
-        offset = (midi_rounded - tonic_rounded) % 12
-        sargam = OFFSET_TO_SARGAM.get(offset, f"?{offset}")
-
-        # Tonic-relative octave: how many octaves above/below the tonic
-        octave_diff = (midi_rounded - tonic_rounded) // 12
-
-        # Clip to [-1, +1] range
-        if octave_diff <= -1:
-            sargam += "'"
-        elif octave_diff >= 1:
-            sargam += "''"
-        # else: middle octave, bare sargam
-
-        # Direction suffix
-        if include_direction and prev_midi is not None:
-            if midi_rounded > prev_midi:
-                sargam += "/U"
-            elif midi_rounded < prev_midi:
-                sargam += "/D"
-            else:
-                sargam += "/="
-
-        current_phrase.append(sargam)
-        prev_midi = midi_rounded
+        tok, prev_midi_val = _tokenize_note(
+            note, tonic_rounded, include_direction, prev_midi_val,
+        )
+        current_phrase.append(tok)
         prev_end = note.end
 
     if current_phrase:
-        phrases.append(current_phrase)
+        token_phrases.append(current_phrase)
 
-    return phrases
-
-
-def tokenize_notes_for_lm_with_map(
-    notes: List[Note],
-    tonic_midi: float,
-    phrase_gap_sec: float = 0.25,
-    include_direction: bool = False,
-) -> tuple:
-    """Like ``tokenize_notes_for_lm`` but also returns a note-index map.
-
-    Returns ``(phrases, note_map)`` where *note_map* is a list of
-    ``(phrase_idx, token_idx_in_phrase) -> note_index`` entries, one per
-    non-BOS token.  This allows mapping evidence tokens back to the
-    original notes (and their timestamps).
-    """
-    if not notes:
-        return [], []
-
-    tonic_rounded = int(round(tonic_midi))
-    phrases_result: List[List[str]] = []
-    current_phrase: List[str] = []
-    prev_end: Optional[float] = None
-    prev_midi: Optional[int] = None
-
-    # note_map: list of (phrase_idx, token_idx) -> note_index
-    note_map: List[tuple] = []
-    phrase_idx = 0
-
-    for ni, note in enumerate(notes):
-        if prev_end is None or (note.start - prev_end) > phrase_gap_sec:
-            if current_phrase:
-                phrases_result.append(current_phrase)
-                phrase_idx += 1
-            current_phrase = ["<BOS>"]
-            prev_midi = None
-
-        midi_rounded = int(round(note.pitch_midi))
-        offset = (midi_rounded - tonic_rounded) % 12
-        sargam = OFFSET_TO_SARGAM.get(offset, f"?{offset}")
-        octave_diff = (midi_rounded - tonic_rounded) // 12
-        if octave_diff <= -1:
-            sargam += "'"
-        elif octave_diff >= 1:
-            sargam += "''"
-        if include_direction and prev_midi is not None:
-            if midi_rounded > prev_midi:
-                sargam += "/U"
-            elif midi_rounded < prev_midi:
-                sargam += "/D"
-            else:
-                sargam += "/="
-
-        token_idx = len(current_phrase)
-        current_phrase.append(sargam)
-        note_map.append((phrase_idx, token_idx, ni))
-        prev_midi = midi_rounded
-        prev_end = note.end
-
-    if current_phrase:
-        phrases_result.append(current_phrase)
-
-    return phrases_result, note_map
+    return token_phrases

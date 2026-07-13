@@ -125,6 +125,7 @@ class PipelineConfig:
     phrase_max_gap: float = 1.0           # Max silence between notes in phrase
     phrase_min_length: int = 1            # Minimum notes per phrase
     phrase_min_duration: float = 0.2      # Minimum phrase duration in seconds
+    phrase_method: str = "rms"            # "rms" (energy-based) or "gap" (inter-note gap, legacy)
 
     # Silence-based phrase splitting (RMS energy)
     # When > 0, phrases are additionally split at points where vocal RMS
@@ -147,6 +148,8 @@ class PipelineConfig:
     lm_deletion_lambda: float = 2.0
     lm_deletion_slope: float = -0.0684
     lm_deletion_intercept: float = 0.6640
+    lm_hist_weight: float = 0.3       # alpha: histogram weight in combined LM scoring
+    lm_score_weight: float = 0.5      # beta: LM weight in combined LM scoring
 
     # db paths
     raga_db_path: Optional[str] = None    # Auto-locates if None
@@ -632,6 +635,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="RMS energy threshold (0.0-1.0) for silence-based phrase splitting. 0 disables.",
     )
     analyze_parser.add_argument("--silence-min-duration", type=float, default=0.25, help="Minimum silence duration (seconds) to trigger a phrase break.")
+    analyze_parser.add_argument(
+        "--phrase-method",
+        choices=["rms", "gap"],
+        default="rms",
+        help="Phrase detection method: 'rms' (energy-based silence detection, default) "
+        "or 'gap' (legacy inter-note gap clustering).",
+    )
     analyze_parser.add_argument("--phrase-min-duration", type=float, default=0.2, help="Exclude phrases shorter than this duration (seconds).")
     analyze_parser.add_argument("--phrase-min-notes", type=int, default=1, help="Exclude phrases with fewer notes than this count.")
     analyze_parser.add_argument("--no-rms-overlay", action="store_true", help="Disable RMS energy overlay on pitch analysis plots.")
@@ -746,6 +756,8 @@ def _config_from_parsed_args(args: argparse.Namespace, parser: argparse.Argument
         lm_deletion_lambda=getattr(args, 'lm_deletion_lambda', 2.0),
         lm_deletion_slope=getattr(args, 'lm_deletion_slope', -0.0684),
         lm_deletion_intercept=getattr(args, 'lm_deletion_intercept', 0.6640),
+        lm_hist_weight=getattr(args, 'lm_hist_weight', 0.3),
+        lm_score_weight=getattr(args, 'lm_score_weight', 0.5),
         mode=mode,
         tonic_override=getattr(args, 'tonic', None),
         raga_override=getattr(args, 'raga', None),
@@ -764,6 +776,7 @@ def _config_from_parsed_args(args: argparse.Namespace, parser: argparse.Argument
         silence_threshold=getattr(args, 'silence_threshold', 0.0),
         silence_min_duration=getattr(args, 'silence_min_duration', 0.25),
         phrase_min_duration=getattr(args, 'phrase_min_duration', 0.2),
+        phrase_method=getattr(args, 'phrase_method', 'rms'),
         phrase_min_length=getattr(args, 'phrase_min_notes', 1),
         show_rms_overlay=not getattr(args, 'no_rms_overlay', False),
         melody_source=getattr(args, 'melody_source', "separated"),

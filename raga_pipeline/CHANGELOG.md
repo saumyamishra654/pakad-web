@@ -4,6 +4,205 @@
 
 ---
 
+## 2026-06-11
+
+### Documentation
+
+- **docs/post-thesis-updates.md:** Consolidated post-thesis roadmap — Pakad hosting checklist, pipeline sync procedure, samvad integration options, pitch-matching game + karaoke feature specs, product sequencing, and summary pointer to the pipeline refactor plan.
+
+### Removed (dead code)
+
+- **sequence.py:** Deleted `detect_notes()` (legacy note detection entry point, superseded by `transcription.detect_stationary_events`/`transcribe_to_notes`; zero call sites) and `split_phrases_by_silence()` (legacy two-stage phrase re-splitter, superseded by `detect_phrases_by_silence` in the 2026-05-04 RMS-primary refactor; zero call sites). Updated module docstring.
+- **driver.py:** Removed now-dead imports of `detect_notes` and `split_phrases_by_silence`.
+- **__init__.py:** Removed `detect_notes` from lazy exports.
+- **runtime_fingerprint.py:** Removed the `split_phrases_by_silence` selector from analyze-phase fingerprinting. Note: this changes analyze-stage fingerprints, so existing reports will show as stale.
+
+### Repo hygiene
+
+- Committed previously untracked experiment code: 13 sweep scripts in `scripts/` plus `autoresearch_transcription_repo/`.
+- Untracked committed junk: `.DS_Store` files, `.claude/worktrees/motifs` gitlink, `main notebooks/2stems.tar.gz`, duplicate trailing-space `pretrained_models ` dirs (raga_pipeline/ and main notebooks/), tracked `results/` demo artifacts. Deleted `raga_pipeline/detect_output.txt`. Added ignore rules for `.claude/` and trailing-space dirs.
+
+### Documentation
+
+- **LLM_REFERENCE.md:** Updated phrase-flow diagram to RMS-primary dispatch, fixed preprocess ingest mode names, refreshed header date.
+- **docs/reports/2026-04-01-language-model-experiments.md:** Added addendum covering Exp 23b (88.9%) and Exp 30 (90.6%); updated headline numbers.
+- **README.md:** Fixed broken `raga_pipeline/DOCUMENTATION.md` link.
+- **NOTEBOOK_VS_PIPELINE_COMPARISON.md:** Added stale-document notice; corrected aaroh/avroh implementation status.
+- **docs/superpowers/plans/2026-06-11-pipeline-refactor-plan.md:** New phased refactor plan (LM re-rank extraction, shared eval library, output.py split, per-mode orchestrators, local app modularisation).
+
+## 2026-05-05
+
+### Refactor
+
+- **tokenize_notes_for_lm:** Extracted note-to-token logic into `_tokenize_note()` helper. Added optional `phrases: List[Phrase]` parameter so pre-computed phrase boundaries (e.g. from `detect_phrases_by_silence`) flow through to LM tokenization instead of the internal 0.25s gap heuristic. Flat note list path unchanged for backward compat.
+
+### Experiment
+
+- **Exp 30 (RMS phrase boundaries + weight sweep):** RMS energy-based phrase boundaries improve LM-only accuracy +1.3pp (256->260 at GT tonic). With retuned weights (alpha=0.3, beta=0.5), combined top-1 reaches **90.6%** (269/297), up from 88.9% baseline. New best honest result. Results at `results/pipeline_loo_rms_phrases/` and `results/score_weight_sweep/`.
+
+## 2026-05-04
+
+### Added
+
+- **config.py:** Added `phrase_method` field to `PipelineConfig` (default `"rms"`) and corresponding `--phrase-method` CLI argument with choices `rms` / `gap`. Wired through `_config_from_parsed_args`. This controls which phrase detection method the driver dispatches to: `"rms"` for energy-based silence detection (new default) or `"gap"` for legacy inter-note gap clustering.
+- **runtime_fingerprint.py:** Added `detect_phrases_by_silence` selector to analyze-phase fingerprint tracking so changes to the new primary phrase detection function are reflected in runtime hashes.
+
+### Documentation
+
+- **CLAUDE.md:** Added "Phrase splitting" subsection documenting the two-stage phrase segmentation pipeline (inter-note gap KMeans method + RMS energy silence splitting), config defaults, and post-processing steps.
+
+### Refactor
+
+- **RMS-primary phrase splitting:** Added `detect_phrases_by_silence()` as the primary phrase detection method (default `--phrase-method rms`). Takes flat note list + energy track, splits at sustained silence regions. Legacy gap-based method (`detect_phrases`) available via `--phrase-method gap`. Replaced two-stage detect+split chain in driver with single dispatch.
+
+## 2026-04-26
+
+### Experiment
+
+- **Exp 22b (n-gram order sweep, honest uncorrected):** Reran `sweep_ngram_order.py` on verified uncorrected stems (`separated_stems_nocorrection/htdemucs`). Original Exp 22 was LEAKED (default `--stems-root` pointed to corrected `separated_stems/htdemucs`). Honest results: order=6 optimal at 87.5% top-1 (was 96.6%), order=1 drops to 68.7% (was 91.2%). Peak shifted from order=7 to order=6; orders 7-8 overfit on noisier uncorrected data. Results at `results/ngram_order_sweep_uncorrected/`.
+
+## 2026-04-25
+
+### Experiment
+
+- **Exp 23b (truly uncorrected baseline):** Re-ran pipeline LOO with verified uncorrected data from `separated_stems_nocorrection/htdemucs/`. Result: **88.9% combined top-1** (264/297), 94.9% top-3, 92.0% given-tonic. Verified: pitch data identical within 0.005 Hz, transcriptions genuinely different for 291/297 recordings. **New honest best result**, beating Exp 26 per-hyp correction (85.5%) by 3.4pp due to distribution matching.
+- **Exp 29 (top-3 rerank):** Top-3 histogram candidates at detected/given tonic, per-hyp corrected, LM rerank. Auto: 70.7%, given: 72.7%. Negative result: top-3 recall ceiling only 86.9% (histogram misses GT in 39/297 cases), too aggressive a filter.
+- **Exp 23 leakage confirmed:** Original 89.6% "uncorrected baseline" used corrected transcriptions from default stems directory. Verified by comparing 300 recordings: 291 differ, 6 identical (already in-scale), 3 missing. The ~0.7pp difference (89.6% vs 88.9%) reflects the small benefit of pre-corrected transcriptions.
+- **Exp 28c (alignment, 30-raga filter):** Full 297-recording LOO with corrected-train alignment LM, top-10 histogram candidates, 30-raga filter. Sub_fraction delta = -0.089 (GT needs fewer substitutions). Best: logistic 66.7%, C2 (LM - 2.0*sub) 63.6%, both beating hist-only 56.6%. GT recall 97.6% (290/297). Still below 88.9% baseline.
+
+### Production Integration
+
+- **Trained production LM model** (order=7, 30 ragas, all 297 recordings) at `raga_pipeline/models/compmusic_ngram_model.json`. Uses uncorrected transcriptions from `separated_stems_nocorrection` to match Exp 23b distribution.
+- **LM scoring now enabled by default:** `use_lm_scoring=True`, `lm_skip_correction=True` in `config.py`. Pipeline automatically loads model from `raga_pipeline/models/`.
+- **LM winner feeds back into `results.detected_raga`:** After Step 5.5 re-ranking, the combined top-1 raga/tonic replaces the histogram top-1, so `detection_report.meta.json` and the subsequent analyze step use the LM-reranked result.
+- **Updated `_find_lm_model_path()`** to search `raga_pipeline/models/compmusic_ngram_model.json` first.
+- **Synced pipeline to raga-web-app:** Copied `language_model/` module, trained model, `driver.py`, `config.py`, `sequence.py`. Updated `api/routes/results.py` to prefer `lm_candidates.csv`.
+- **Web app: raga dropdown now shows 30 CompMusic ragas** (reads from trained LM model instead of full 113-raga CSV). Falls back to CSV if model not found.
+- **Web app: dual candidates display** -- results page shows both "Combined (Histogram + LM)" and "Histogram Only" candidate tables side by side. API returns `histogramCandidates` alongside `candidates`.
+- **Fixed CLI defaults:** Changed `--use-lm-scoring` and `--lm-skip-correction` from `store_true` (always-false default) to `BooleanOptionalAction` with `default=True`. Use `--no-use-lm-scoring` to disable.
+- **Fixed meta.json hero display:** Web app now reads `selected_raga` (LM winner) over `top_raga` (histogram) in results endpoint and job runner.
+- **YouTube start/end time trimming:** Upload page YouTube tab now has optional start/end time inputs (MM:SS format). Backend passes them through to `download_youtube_audio()` which trims via ffmpeg post-download.
+- **Browser microphone recording with tanpura:** New "Record" tab in upload page. Uses MediaRecorder API for browser-side recording. Optional tanpura drone playback (12 keys) during recording via HTML5 Audio streaming from `/api/tanpura-audio/{key}`. Tanpura key auto-sets tonic. Recording uploads as file and creates song in library with `source: "recording"`.
+- **Tanpura API endpoints:** `/api/tanpura-tracks` lists available keys, `/api/tanpura-audio/{key}` streams tanpura MP3. Tanpura assets copied from pipeline repo.
+- **Recording source in library:** Songs from recordings show green "Rec" badge. Appear under "Uploaded" filter alongside file uploads.
+
+### Feature
+
+- New `scripts/sweep_top3_rerank_loo.py`: top-K rerank at detected/given tonic with per-hyp correction and LM reranking. Supports auto (detected tonic) and given (GT tonic) strategies.
+- Added `--gated-only`, `--top-k`, and auto 30-raga filter to `sweep_alignment_loo.py`
+- Added sub_fraction penalty methods (C2, C3) and hist-only baseline (G) to Phase 2 scoring
+- Added sub_fraction to logistic regression features and LM diagnostic printout
+
+### Documentation
+
+- Comprehensive update to `docs/reports/2026-04-18-advanced-scoring-experiments.md`: renamed to Exp 16-29, added Exp 23b and 29, marked Exp 23 as LEAKED, updated cross-experiment summary with corrected rankings, added error decomposition and confusion pair analysis, added same-scale raga group table, added improvement strategies section
+
+## 2026-04-24
+
+### Experiment
+
+- **Exp 28a (alignment diagnostic):** Lambda_match sweep on 15 recordings. Discovered lm_per_token discards substitution cost -- sub_fraction is the discriminative feature (w_sub=1 gives 100% on 15 rec).
+- **Exp 28b (alignment, no filter):** 297-recording LOO, top-10, 78-raga histogram. Sub_fraction delta -0.048. Best C2 (LM - 5.0*sub) 69.7%. Hist-only depressed to 56.6% due to LM filtering artifacts (78 DB ragas vs 30 LM ragas).
+
+## 2026-04-23
+
+### Feature
+
+- New `raga_pipeline/language_model/alignment.py`: beam DP alignment scorer for noisy-channel LM scoring. Skip/match/substitute transitions with configurable penalties (lambda_skip, lambda_match, lambda_sub). Phrase-local alignment with beam pruning.
+- `scripts/sweep_alignment_loo.py`: LOO evaluation script with two-phase design (feature collection + fold-safe scoring methods). Includes hist-only baseline, z-scored fusion, logistic regression, RRF.
+- Added `NgramModel.vocabulary` property and `NgramModel.remove_raga()` method.
+
+## 2026-04-19
+
+### Feature
+
+- New offline sweep script `scripts/sweep_perhyp_correction_loo.py`: per-hypothesis correction LOO experiment. Trains n-gram LM on GT-raga-corrected transcriptions, then at test time corrects the raw uncorrected transcription per each candidate (tonic, raga) pair before scoring against the LM. Phase 1 (calibration) checks LM calibration within same-scale adversarial groups. Phase 2 (full LOO) runs histogram + per-hypothesis-corrected LM combined scoring with checkpoint/resume support. Eliminates train/test distribution mismatch from corrected-train approach.
+
+## 2026-04-18
+
+### Feature
+
+- Added standalone `autoresearch_transcription_repo/` scaffold for autonomous transcription-parameter search (Karpathy-style autoresearch loop). Includes Optuna-based trial runner (`run_study.py`), per-recording evaluator with correction-burden objective (`src/autoresearch_tuner/evaluator.py`), trial logging (`trial_metrics.jsonl`), reproducible defaults (`configs/default_study.json`), and an explicit agent system prompt (`prompts/system_prompt.md`).
+
+- Enhanced `autoresearch_transcription_repo/` objective modes with an F1-style retention/deletion target (`f1_retention_deletion`) and optional F1+token blend (`f1_retention_deletion_plus_token`). The default study config now uses F1 retention/deletion optimization, while preserving the original weighted-sum objective as a selectable mode.
+
+- Finalized a fixed reusable system prompt at `autoresearch_transcription_repo/prompts/system_prompt.md` with a single objective definition (`1 - retention_deletion_f1`), explicit leakage guards, fixed tuning scope, and required reporting outputs for thesis-safe runs.
+
+- Fixed autoresearch loop initialization crash in `autoresearch_transcription_repo/src/autoresearch_tuner/study.py` by using the repository's supported `RagaDatabase` constructor API (with `from_csv` compatibility fallback), resolving `AttributeError: type object 'RagaDatabase' has no attribute 'from_csv'` during `run_study.py` startup.
+
+- Reduced noisy per-recording console output during raga correction by gating `get_raga_notes(...)` match logs behind `RAGA_LOG_RAGA_MATCHES=1` in `raga_pipeline/raga.py` (default now silent). This keeps long tuning loops readable without changing correction behavior.
+
+- Added a true LLM-driven autoresearch path in `autoresearch_transcription_repo/` with `run_llm_autoresearch.py` and `src/autoresearch_tuner/llm_loop.py`. The new loop queries an LLM for the next parameter proposal, evaluates it through the existing pipeline/evaluator, and keeps/discards based on objective improvement while journaling every iteration (`llm_autoresearch_journal.jsonl`) and persisting best state (`llm_autoresearch_state.json`). Added companion config `configs/llm_autoresearch.json` and Karpathy-style instruction file `program.md`.
+
+- New offline sweep script `scripts/sweep_cadence_lm.py` (Experiment 21): trains per-raga n-gram LM on cadential phrases only (last 4 notes before each return to Sa) and evaluates via LOO whether cadence-restricted models add discriminative power. Cadence extraction: phrase split at 0.5s gap, keep Sa-terminated phrases with >= 2 pre-Sa notes, tokenize with `tokenize_notes_for_lm`. Model tiers: trigram (add_k=0.1) for ragas with >= 20 cadence tokens, bigram backoff (add_k=0.5) for 10-20 tokens, skip below 10. Outputs `results/cadence_lm/{progress,summary,cadence_examples}.csv`. Checkpoint/resume support.
+
+- New offline sweep script `scripts/sweep_gmm_fingerprint.py` (Experiment 20): extracts per-swara within-note features (width, shruti offset, skew) from both raw frame-level f0 statistics and existing GMM fits.  Phase C1 builds LOO raga templates and runs Welch t-tests with BH correction on confused pairs; Phase C2 (conditional) performs LOO distance-based classification using weighted squared deviation.  60 features (5 per PC x 12 PCs). Checkpoint/resume support.  Outputs `results/gmm_fingerprint/{fingerprints,confused_pair_analysis,loo_integration,summary}.csv`.
+
+- New offline sweep script `scripts/sweep_positional_pch.py` (Experiment 18): evaluates three positional pitch-class histogram features -- nyas PCH (phrase-ending), phrase-start PCH, and octave-stratified PCH (36-dim) -- as standalone raga discriminators via leave-one-out cosine similarity against per-raga mean templates. Sweeps `phrase_gap_sec` in {0.25, 0.5, 1.0}. Reports accuracy under both GT-tonic and detected-tonic (from saturation calibration) regimes. Checkpoint/resume support. Outputs `results/positional_pch/{progress,summary}.csv`.
+
+- New offline sweep script `scripts/sweep_microtonal_pch.py` (Experiment 19): tests whether 24-TET or 36-TET pitch-class histograms capture microtonal raga differences better than standard 12-TET. Leave-one-out evaluation using GT tonic, cosine similarity against per-raga mean templates. Checkpoint/resume support. Outputs `results/microtonal_pch/{progress,summary}.csv`.
+
+### Fix
+
+- Raise fit_norm clip from [-1.0, 1.0] to [-2.0, 2.0] in `raga.py` (Exp 16 calibration). The band-pass tonic boost was saturating candidates at the clip boundary, creating large tied clusters and suppressing histogram-only raga accuracy from ~74% to ~24%. Combined score was unaffected because LM dominates, but the saturation would interfere with new additive scoring terms.
+
+### Enhancement
+
+- `--lm-model` now auto-discovers `compmusic_ngram_model_uncorrected.json` (preferred) or `compmusic_ngram_model.json` from the project root or `raga_pipeline/models/` when `--use-lm-scoring` is passed without an explicit path. New `PipelineConfig._find_lm_model_path()` mirrors the existing `_find_model_path()` pattern.
+
+## 2026-04-17
+
+### Feature
+
+- New offline analysis script `scripts/sweep_truncation.py`: for each recording in the GT CSV and each time window (first_300/first_600/first_900/full/last_300), slices cached pitch and transcription CSVs, reruns `RagaScorer.score(...)` with pipeline-parity defaults (confidence thresholds 0.95/0.80, `use_confidence_weights=True`, `prominence_high=0.01`, `prominence_low=0.03`, raw `len(peaks.validated_indices)`, gender-filtered tonic candidates, 30-raga filter from GT), and scores the sliced transcription against the pre-trained LM. Writes resume-safe `results/truncation_sweep/{progress,summary}.csv`.
+
+### Results (Experiment 15)
+
+- Truncation sweep, 298 recordings x 5 windows. Tonic top-1: first_300=88.9% -> full=92.3% (-3.4 pp). End-to-end (LM + detected tonic): first_300=88.6% -> full=92.3% (-3.7 pp). Conclusion: **truncation hurts**, full window is best.
+- Per-raga: Todi, Alhaiya Bilawal, Kedar, Marwa, Puriya Dhanashree all drop 20+ pp when truncated to first 5 min -- their drut/antara carries raga-defining content the alap alone cannot establish.
+- Incidental finding: `fit_score` saturation from the band-pass boost (`ACC_BAND_WEIGHT=0.80`) causes large tied clusters at `fit_score=1000`. Pipeline end-to-end accuracy unaffected (normalization within combined score squashes the ties), but histogram-alone is no longer a clean signal. Flagged for post-thesis cleanup.
+
+### Documentation
+
+- Added Experiment 15 section to `docs/reports/2026-04-01-language-model-experiments.md`; updated Final Summary and Open Questions.
+
+---
+
+## 2026-04-16
+
+### Feature
+
+- Added band-pass accompaniment tonic boost to `RagaScorer` (`raga_pipeline/raga.py`). Builds a second accompaniment pitch-class histogram from voiced frames whose `pitch_hz` falls in `[ACC_BAND_MIN_HZ, ACC_BAND_MAX_HZ)` (defaults 100-300 Hz, the tanpura fundamental range) and adds `ACC_BAND_WEIGHT (0.80) * H_acc_band[tonic] / max(H_acc_band)` to the fit score. Replaces the previous full-range `TONIC_SALIENCE_WEIGHT` term (now unused, retained for backward compat). Raises tonic top-1 detection from 74.2% to 94.3% on the CompMusic 298-recording subset (offline eval with gender range filter).
+- Added Sa-Pa accompaniment pair boost (`SAPAPAIR_WEIGHT = 0.20`): rewards candidate tonics where the full-range accompaniment histogram has mass at both `tonic` and `(tonic+7) % 12`, capturing the tanpura's Sa/Pa drone pair (committed separately in `efd132c`).
+- New `candidates.csv` diagnostic columns: `tonic_sal_full_norm`, `tonic_sal_band_norm`, `band_frame_count`.
+- Added checkpoint/resume support to `run_pipeline_loo.py` and `run_pipeline_loo_known_tonic.py` via `run_pipeline_loo_progress.csv` and `run_pipeline_loo_known_tonic_progress.csv`. Reruns skip already-processed filenames; summary metrics are rebuilt from checkpoint rows. Failures are recorded as `FAILED` rows and excluded from accuracy counts.
+- New offline analysis script `scripts/sweep_tonic_bandpass.py`: sweeps frequency bands and weights against existing `nometa/*/candidates.csv` and accompaniment pitch CSVs, writes `results/bandpass_tonic/{band_sweep,weight_sweep}_results.csv`.
+
+### Results
+
+- Pipeline LOO (uncorrected LM, detected tonic) top-1: 84.2% (Exp 13) -> **87.2%** (Exp 14, 260/298).
+- Pipeline LOO top-3: 93.0% -> **95.0%** (283/298).
+- Closes 56% of the gap to the known-tonic ceiling (89.6% top-1).
+
+### Documentation
+
+- Added Experiment 14 section and updated Final Summary / Open Questions in `docs/reports/2026-04-01-language-model-experiments.md`.
+
+---
+
+## 2026-03-30
+
+- Added n-gram language model for raga detection (`raga_pipeline/language_model/`).
+  - Shared tokenizer `tokenize_notes_for_lm` in `sequence.py`: octave-marked sargam tokens with `<BOS>` phrase boundaries.
+  - `NgramModel` class: per-raga n-gram counts (order 1..N), add-k smoothing, interpolated scoring, JSON serialization.
+  - `train_model`: builds models from ground-truth CSV + transcription CSVs (reuses `motifs.py` candidate discovery).
+  - `score_transcription`: classifies recordings with optional segment-level confidence curves.
+  - `evaluate_model`: leave-one-out cross-validation with order sweep support.
+  - CLI: `python -m raga_pipeline.language_model train|score|evaluate`.
+  - 25 tests across 6 test files (`tests/test_lm_*.py`).
+
+---
+
 ## 2026-03-26
 
 ### Feature

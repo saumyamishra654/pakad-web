@@ -55,8 +55,8 @@ from raga_pipeline.raga import (
     get_aaroh_avroh_pattern_for_raga,
 )
 from raga_pipeline.sequence import (
-    detect_notes, 
-    detect_phrases, 
+    detect_phrases,
+    detect_phrases_by_silence,
     cluster_phrases,
     compute_transition_matrix,
     transcribe_notes,
@@ -65,7 +65,6 @@ from raga_pipeline.sequence import (
     find_common_patterns,
     analyze_raga_patterns,
     merge_consecutive_notes,
-    split_phrases_by_silence,
 )
 from raga_pipeline.output import (
     AnalysisResults,
@@ -171,20 +170,24 @@ def _transcribe_for_extractor(
     notes = merge_consecutive_notes(notes, max_gap=0.1, pitch_tolerance=0.7,
                                      max_dropout_gap=0.18, dropout_fragment_duration=0.12)
 
-    # Phrase detection + silence split + collapse
-    phrases = detect_phrases(notes, max_gap=config.phrase_max_gap,
-                              min_length=config.phrase_min_length,
-                              min_phrase_duration=config.phrase_min_duration)
+    # Phrase detection
     silence_thresh = config.silence_threshold
     if silence_thresh <= 0 and config.energy_threshold > 0:
         silence_thresh = config.energy_threshold
-    if silence_thresh > 0:
-        phrases = split_phrases_by_silence(
-            phrases=phrases, energy=pitch_data.energy,
+
+    if config.phrase_method == "rms" and silence_thresh > 0 and len(pitch_data.energy) > 0:
+        phrases = detect_phrases_by_silence(
+            notes, energy=pitch_data.energy,
             timestamps=pitch_data.timestamps,
             silence_threshold=silence_thresh,
             silence_min_duration=config.silence_min_duration,
+            min_phrase_duration=config.phrase_min_duration,
+            min_notes_in_phrase=config.phrase_min_length,
         )
+    else:
+        phrases = detect_phrases(notes, max_gap=config.phrase_max_gap,
+                                  min_length=config.phrase_min_length,
+                                  min_phrase_duration=config.phrase_min_duration)
 
     # Phrase-level collapse
     if phrases:
@@ -969,9 +972,14 @@ def run_pipeline(
                     # OPTION A: No per-raga correction. Tokenize once per
                     # tonic, score against every raga in the LM. Much faster.
                     tonic_phrases_cache: Dict[int, list] = {}
+                    rms_phrases = detect_phrases_by_silence(
+                        merged_notes, pitch_data.energy, pitch_data.timestamps,
+                    ) if merged_notes and len(pitch_data.energy) > 0 else []
                     for tonic_pc in unique_tonics:
                         tonic_midi = 60.0 + tonic_pc
-                        tonic_phrases_cache[tonic_pc] = tokenize_notes_for_lm(merged_notes, tonic_midi)
+                        tonic_phrases_cache[tonic_pc] = tokenize_notes_for_lm(
+                            merged_notes, tonic_midi, phrases=rms_phrases,
+                        )
 
                     for _, cand_row in results.candidates.iterrows():
                         cand_tonic = int(cand_row["tonic"])
@@ -1027,8 +1035,13 @@ def run_pipeline(
                                 corrected_notes, max_gap=0.1, pitch_tolerance=0.7,
                                 max_dropout_gap=0.18, dropout_fragment_duration=0.12,
                             )
+                            corrected_rms = detect_phrases_by_silence(
+                                corrected_merged, pitch_data.energy, pitch_data.timestamps,
+                            ) if corrected_merged and len(pitch_data.energy) > 0 else []
                             tonic_midi = 60.0 + cand_tonic
-                            phrases = tokenize_notes_for_lm(corrected_merged, tonic_midi)
+                            phrases = tokenize_notes_for_lm(
+                                corrected_merged, tonic_midi, phrases=corrected_rms,
+                            )
                             lm_score = lm_model.score_sequence(cand_raga, phrases) if phrases else -999.0
 
                             lm_rows.append({
@@ -1070,8 +1083,13 @@ def run_pipeline(
                 # Defaults: alpha=1.0, beta=1.0, gamma=2.0 (lambda)
                 # norm(histogram) and norm(lm) are in [0,1]; del_residual is ~[-0.2, +0.2]
                 lam = config.lm_deletion_lambda
-                alpha = 0.5  # histogram weight
-                beta = 2.0   # LM weight
+                alpha = config.lm_hist_weight
+                beta = config.lm_score_weight
+                print(
+                    "  LM combine weights: "
+                    f"alpha={alpha:.3f}, beta={beta:.3f}, lambda={lam:.3f}; "
+                    "phrase boundaries=rms_silence"
+                )
                 for row in lm_rows:
                     is_gated = (row["tonic"], row["raga"]) in gated_ragas
                     row["gated"] = is_gated
@@ -1107,101 +1125,6 @@ def run_pipeline(
                     print(f"  LM Top: {top['raga']} (tonic={top['tonic_name']}, "
                           f"combined={top['combined_score']}, lm={top['lm_score']}, "
                           f"del_resid={top['del_residual']})")
-
-                # Generate n-gram evidence for the winning raga
-                if lm_rows and lm_rows[0]["combined_score"] > -900:
-                    from raga_pipeline.sequence import tokenize_notes_for_lm_with_map
-                    from collections import defaultdict
-
-                    win_raga = lm_rows[0]["raga"]
-                    win_tonic = int(lm_rows[0]["tonic"])
-                    win_tonic_midi = 60.0 + win_tonic
-                    ev_phrases, note_map = tokenize_notes_for_lm_with_map(
-                        merged_notes, win_tonic_midi
-                    )
-                    _, token_evidence = lm_model.score_sequence_with_evidence(
-                        win_raga, ev_phrases
-                    )
-
-                    # Build reverse lookup: (phrase_idx, token_idx) -> note
-                    tok_to_note = {}
-                    for pi, ti, ni in note_map:
-                        tok_to_note[(pi, ti)] = merged_notes[ni]
-
-                    # Deduplicate by n-gram, collect occurrences
-                    ngram_groups = defaultdict(lambda: {
-                        "order": 0, "entropy_weight": 0.0,
-                        "total_contribution": 0.0, "occurrences": [],
-                    })
-                    for ev in token_evidence:
-                        key = tuple(ev["ngram"])
-                        g = ngram_groups[key]
-                        g["order"] = ev["order"]
-                        g["entropy_weight"] = max(g["entropy_weight"], ev["entropy_weight"])
-                        g["total_contribution"] += ev["contribution"]
-                        note = tok_to_note.get((ev["phrase_idx"], ev["token_idx"]))
-                        if note:
-                            # Build the time span covering the full n-gram
-                            first_tok_idx = ev["token_idx"] - ev["order"] + 1
-                            first_note = tok_to_note.get((ev["phrase_idx"], max(1, first_tok_idx)))
-                            start_t = first_note.start if first_note else note.start
-                            g["occurrences"].append({
-                                "start": round(start_t, 3),
-                                "end": round(note.end, 3),
-                                "phrase_idx": ev["phrase_idx"],
-                            })
-
-                    # Rank by entropy weight (raga-specificity), break ties by
-                    # occurrence count (prefer patterns that recur throughout)
-                    sorted_ngrams = sorted(
-                        ngram_groups.items(),
-                        key=lambda x: (x[1]["entropy_weight"], len(x[1]["occurrences"])),
-                        reverse=True,
-                    )[:20]
-
-                    top_evidence = []
-                    for ng_tuple, g in sorted_ngrams:
-                        top_evidence.append({
-                            "ngram": list(ng_tuple),
-                            "order": g["order"],
-                            "entropy_weight": round(g["entropy_weight"], 4),
-                            "total_contribution": round(g["total_contribution"], 4),
-                            "occurrence_count": len(g["occurrences"]),
-                            "occurrences": g["occurrences"],
-                        })
-
-                    # Per-phrase summary
-                    phrase_scores = defaultdict(lambda: {"score": 0.0, "token_count": 0})
-                    for ev in token_evidence:
-                        ps = phrase_scores[ev["phrase_idx"]]
-                        ps["score"] += ev["contribution"]
-                        ps["token_count"] += 1
-
-                    phrases_summary = []
-                    for pi in sorted(phrase_scores.keys()):
-                        # Find first and last note in this phrase
-                        phrase_notes = [
-                            merged_notes[ni] for ppi, ti, ni in note_map if ppi == pi
-                        ]
-                        if phrase_notes:
-                            phrases_summary.append({
-                                "phrase_idx": pi,
-                                "start": round(phrase_notes[0].start, 3),
-                                "end": round(phrase_notes[-1].end, 3),
-                                "phrase_score": round(phrase_scores[pi]["score"], 4),
-                                "token_count": phrase_scores[pi]["token_count"],
-                            })
-
-                    evidence_payload = {
-                        "raga": win_raga,
-                        "total_score": round(lm_rows[0]["lm_score"], 4),
-                        "top_evidence": top_evidence,
-                        "phrases": phrases_summary,
-                    }
-                    ev_path = os.path.join(stem_dir, "lm_evidence.json")
-                    with open(ev_path, "w", encoding="utf-8") as _ef:
-                        _json.dump(evidence_payload, _ef, indent=2)
-                    print(f"  Saved: {ev_path} ({len(top_evidence)} top n-grams)")
 
             _print_timing("Step 5.5/7 LM re-ranking", perf_counter() - step55_start, audio_duration_s)
 
@@ -1391,33 +1314,34 @@ def run_pipeline(
         print(f"  Initial note merge: {len(results.notes)} notes")
 
         # Phrase detection (using corrected notes)
-        results.phrases = detect_phrases(
-            results.notes,
-            max_gap=config.phrase_max_gap,
-            min_length=config.phrase_min_length,
-            min_phrase_duration=config.phrase_min_duration,
-        )
-        print(f"  Detected {len(results.phrases)} phrases (gap-based)")
-
-        # Silence-based phrase splitting (optional, uses vocal RMS energy)
         silence_thresh = config.silence_threshold
         if silence_thresh <= 0 and config.energy_threshold > 0:
-            # Default: reuse the transcription energy threshold so the user
-            # gets silence-aware splitting automatically when energy gating is on.
             silence_thresh = config.energy_threshold
 
-        if silence_thresh > 0 and results.pitch_data_vocals is not None:
-            pre_count = len(results.phrases)
-            results.phrases = split_phrases_by_silence(
-                phrases=results.phrases,
+        if (config.phrase_method == "rms"
+                and silence_thresh > 0
+                and results.pitch_data_vocals is not None
+                and len(results.pitch_data_vocals.energy) > 0):
+            results.phrases = detect_phrases_by_silence(
+                results.notes,
                 energy=results.pitch_data_vocals.energy,
                 timestamps=results.pitch_data_vocals.timestamps,
                 silence_threshold=silence_thresh,
                 silence_min_duration=config.silence_min_duration,
+                min_phrase_duration=config.phrase_min_duration,
+                min_notes_in_phrase=config.phrase_min_length,
             )
-            print(f"  Silence split ({silence_thresh:.2f} thresh, "
-                  f"{config.silence_min_duration:.2f}s min): "
-                  f"{pre_count} -> {len(results.phrases)} phrases")
+            print(f"  Detected {len(results.phrases)} phrases "
+                  f"(rms, thresh={silence_thresh:.2f}, "
+                  f"min_dur={config.silence_min_duration:.2f}s)")
+        else:
+            results.phrases = detect_phrases(
+                results.notes,
+                max_gap=config.phrase_max_gap,
+                min_length=config.phrase_min_length,
+                min_phrase_duration=config.phrase_min_duration,
+            )
+            print(f"  Detected {len(results.phrases)} phrases (gap-based)")
 
         # Collapse repeated consecutive note segments within each phrase so
         # sustained notes are represented once per phrase.
