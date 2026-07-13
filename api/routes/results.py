@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import glob
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -12,6 +13,27 @@ from api.auth import get_optional_user
 from api import storage, firestore_client
 
 router = APIRouter(prefix="/api/results", tags=["results"])
+
+
+def require_song_access(song_id: str, user: Optional[dict]) -> dict:
+    """Fetch song and enforce visibility. 404 if missing, 403 if private and not owner."""
+    song = firestore_client.get_song(song_id)
+    if not song:
+        raise HTTPException(status_code=404, detail="Song not found")
+    if song.get("visibility") == "private":
+        if not user or user.get("uid") != song.get("uploadedBy"):
+            raise HTTPException(status_code=403, detail="Access denied")
+    return song
+
+
+_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _safe_filename(filename: str) -> str:
+    """Reject filenames that could escape the artifact directory."""
+    if not _FILENAME_RE.fullmatch(filename) or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    return filename
 
 
 def _read_csv_rows(filepath: str, max_rows: int = 5000) -> list[dict]:
@@ -359,9 +381,8 @@ async def get_audio_file(
     """Serve a stem audio file (e.g. vocals.mp3, accompaniment.mp3, or original)."""
     from fastapi.responses import FileResponse
 
-    song = firestore_client.get_song(song_id)
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
+    song = require_song_access(song_id, user)
+    filename = _safe_filename(filename)
 
     # Handle "original" — serve from uploads dir
     if filename == "original":
@@ -398,9 +419,8 @@ async def get_image_file(
     """Serve an analysis image (histogram, transition matrix, etc.)."""
     from fastapi.responses import FileResponse
 
-    song = firestore_client.get_song(song_id)
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
+    song = require_song_access(song_id, user)
+    filename = _safe_filename(filename)
     audio_hash = song.get("audioHash", "")
     art_dir = _find_artifact_dir(audio_hash)
     filepath = f"{art_dir}/{filename}"
@@ -416,9 +436,7 @@ async def get_pitch_data(
     user: Optional[dict] = Depends(get_optional_user),
 ):
     """Return filtered pitch data points for a given stem."""
-    song = firestore_client.get_song(song_id)
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
+    song = require_song_access(song_id, user)
     audio_hash = song.get("audioHash", "")
     art_dir = _find_artifact_dir(audio_hash)
     # Map "original" to "composite" pitch data

@@ -14,10 +14,8 @@ router = APIRouter(prefix="/api/songs/{song_id}/transcription", tags=["transcrip
 @router.get("")
 async def get_transcription(song_id: str, user: Optional[dict] = Depends(get_optional_user)):
     """Get the current transcription from the results endpoint data."""
-    from api.routes.results import _find_artifact_dir, _read_csv_rows
-    song = firestore_client.get_song(song_id)
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
+    from api.routes.results import _find_artifact_dir, _read_csv_rows, require_song_access
+    song = require_song_access(song_id, user)
     audio_hash = song.get("audioHash", "")
     art_dir = _find_artifact_dir(audio_hash)
     rows = _read_csv_rows(f"{art_dir}/transcribed_notes.csv")

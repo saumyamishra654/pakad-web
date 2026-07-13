@@ -4,15 +4,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from typing import Optional
 from api.auth import get_optional_user
 from api import storage
+from api.routes.results import require_song_access, _safe_filename
 
 router = APIRouter(prefix="/api/artifacts", tags=["artifacts"])
 
 @router.get("/audio/{song_id}/{filename}")
 async def get_audio(song_id: str, filename: str, user: Optional[dict] = Depends(get_optional_user)):
-    from api.firestore_client import get_song
-    song = get_song(song_id)
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
+    song = require_song_access(song_id, user)
+    filename = _safe_filename(filename)
     audio_hash = song.get("audioHash", "")
     rel_path = f"{storage.artifact_dir(audio_hash)}/{filename}"
     if storage.file_exists(rel_path):
@@ -21,10 +20,7 @@ async def get_audio(song_id: str, filename: str, user: Optional[dict] = Depends(
 
 @router.get("/pitch-data/{song_id}")
 async def get_pitch_data(song_id: str, stem: str = "vocals", user: Optional[dict] = Depends(get_optional_user)):
-    from api.firestore_client import get_song
-    song = get_song(song_id)
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
+    song = require_song_access(song_id, user)
     audio_hash = song.get("audioHash", "")
     csv_path = f"{storage.artifact_dir(audio_hash)}/{stem}_pitch_data.csv"
     if not storage.file_exists(csv_path):
@@ -39,6 +35,8 @@ async def get_pitch_data(song_id: str, stem: str = "vocals", user: Optional[dict
 
 @router.get("/analysis-data/{song_id}/{analysis_id}/{filename}")
 async def get_analysis_data(song_id: str, analysis_id: str, filename: str, user: Optional[dict] = Depends(get_optional_user)):
+    require_song_access(song_id, user)
+    filename = _safe_filename(filename)
     rel_path = f"{storage.analysis_dir(analysis_id)}/{filename}"
     if not storage.file_exists(rel_path):
         raise HTTPException(status_code=404, detail="Analysis data not found")
