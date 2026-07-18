@@ -282,3 +282,52 @@ def test_deliver_youtube_audio_object_store_disabled_still_updates_firestore(mon
     delivery = updates[0][2]["audioDelivery"]
     assert delivery["available"] is False
     assert delivery["urls"] == {}
+
+
+def test_deliver_youtube_audio_deletes_local_stems_even_when_upload_fails(monkeypatch, tmp_path):
+    """Legal invariant: a failed delivery upload must NOT leave a YouTube stem
+    on disk, and must NOT fail the analysis job."""
+    class RaisingStore(FakeObjectStore):
+        def upload_file(self, local_path, key, content_type=None):
+            raise RuntimeError("network blip")
+
+    fake_store = RaisingStore(is_enabled=True)
+    monkeypatch.setattr(jobs, "object_store", fake_store)
+    updates = []
+    monkeypatch.setattr(
+        jobs.firestore_client, "update_analysis",
+        lambda song_id, analysis_id, **fields: updates.append(fields),
+    )
+
+    artifact_base = str(tmp_path / "artifacts" / "h")
+    audio_path = tmp_path / "audio.mp3"
+    audio_path.write_bytes(b"orig")
+    stem_dir = tmp_path / "artifacts" / "h" / "htdemucs" / "audio"
+    stem_dir.mkdir(parents=True)
+    (stem_dir / "vocals.mp3").write_bytes(b"voc")
+    (stem_dir / "accompaniment.mp3").write_bytes(b"acc")
+
+    # Must not raise -- delivery is best-effort.
+    jobs._deliver_youtube_audio(_job(), str(audio_path), artifact_base, {}, "h")
+
+    # Stems are gone despite the upload failure -- no server-side audio left.
+    assert not (stem_dir / "vocals.mp3").exists()
+    assert not (stem_dir / "accompaniment.mp3").exists()
+    # Delivery reported unavailable (nothing uploaded successfully).
+    assert updates[-1]["audioDelivery"]["available"] is False
+
+
+def test_purge_youtube_local_removes_all_audio_files_and_is_idempotent(monkeypatch, tmp_path):
+    artifact_base = str(tmp_path / "artifacts" / "h")
+    stem_dir = tmp_path / "artifacts" / "h" / "htdemucs" / "audio"
+    stem_dir.mkdir(parents=True)
+    for name in ("vocals.mp3", "accompaniment.mp3", "original.mp3"):
+        (stem_dir / name).write_bytes(b"x")
+
+    job = _job(job_id="job-purge")
+    jobs._purge_youtube_local(job, str(tmp_path / "audio.mp3"), artifact_base, {})
+
+    for name in ("vocals.mp3", "accompaniment.mp3", "original.mp3"):
+        assert not (stem_dir / name).exists()
+    # Idempotent: a second call on already-clean state does not raise.
+    jobs._purge_youtube_local(job, str(tmp_path / "audio.mp3"), artifact_base, {})

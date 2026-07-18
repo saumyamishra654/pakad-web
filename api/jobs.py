@@ -78,14 +78,39 @@ def _deliver_youtube_audio(job: "Job", audio_path: str, artifact_base: str, para
         "accompaniment": os.path.join(stem_dir, "accompaniment.mp3"),
     }
     for label, path in to_deliver.items():
-        if object_store.enabled() and os.path.exists(path):
-            key = f"delivery/{audio_hash}/{job.user_id}/{label}.mp3"
-            object_store.upload_file(path, key, content_type="audio/mpeg")
-            delivery[label] = object_store.signed_get_url(key, expires_seconds=ttl)
-        if path != audio_path and os.path.exists(path):
-            os.remove(path)  # delete server-side stems (audio-bearing)
+        try:
+            if object_store.enabled() and os.path.exists(path):
+                key = f"delivery/{audio_hash}/{job.user_id}/{label}.mp3"
+                object_store.upload_file(path, key, content_type="audio/mpeg")
+                delivery[label] = object_store.signed_get_url(key, expires_seconds=ttl)
+        except Exception as e:
+            # Delivery is best-effort; the user can regenerate audio on demand
+            # (Plan 011). A failed upload must NOT fail the analysis job.
+            _log(job.id, f"[4/4 Finalize] WARN: delivery upload failed for {label}: {e}")
+        finally:
+            # ALWAYS remove the local stem, even if the upload raised, so no
+            # YouTube-derived audio persists server-side. (audio_path is the temp
+            # download, purged separately by cleanup_tmp / _purge_youtube_local.)
+            if path != audio_path and os.path.exists(path):
+                os.remove(path)
     firestore_client.update_analysis(job.song_id, job.analysis_id,
         audioDelivery={"available": bool(delivery), "urls": delivery, "source": "youtube"})
+
+
+def _purge_youtube_local(job: "Job", audio_path: str, artifact_base: str, params: dict) -> None:
+    """Guarantee no YouTube-derived audio remains on the server, on ANY exit
+    path -- success, early return, or mid-pipeline failure. Idempotent; called
+    from the worker's finally so a failed job cannot leave seeded stems behind.
+    """
+    stem_dir = _stem_dir(artifact_base, audio_path, params.get("demucs_model", "htdemucs"))
+    for name in ("vocals.mp3", "accompaniment.mp3", "original.mp3"):
+        p = os.path.join(stem_dir, name)
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+    storage.cleanup_tmp(job.id)
 
 
 @dataclass
@@ -100,6 +125,11 @@ class Job:
     step: str = ""
     error: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    # Set during _run_pipeline so the worker's finally can purge YouTube audio
+    # even if the pipeline raises before reaching the finalize/delivery step.
+    source: Optional[str] = None
+    audio_path: Optional[str] = None
+    artifact_base: Optional[str] = None
 
 
 _job_queue: queue.Queue = queue.Queue()
@@ -180,6 +210,12 @@ def _run_pipeline(job: Job) -> None:
 
     artifact_base = str(storage.ensure_dir(storage.artifact_dir(audio_hash)))
     _log(job.id, f"Artifact output dir: {artifact_base}")
+
+    # Record for the worker's finally-purge (guarantees no YouTube audio lingers
+    # server-side even if the pipeline raises below).
+    job.source = source
+    job.audio_path = audio_path
+    job.artifact_base = artifact_base
 
     # Offload stem separation to the remote GPU worker (Plan 008), if enabled.
     _offload_stems(job, audio_path, artifact_base, params)
@@ -345,6 +381,13 @@ def _worker() -> None:
                 pass
             traceback.print_exc()
         finally:
+            # Legal invariant: no YouTube-derived audio may linger server-side,
+            # whether the job succeeded, returned early, or failed mid-pipeline.
+            try:
+                if job.source == "youtube" and job.audio_path and job.artifact_base:
+                    _purge_youtube_local(job, job.audio_path, job.artifact_base, job.params)
+            except Exception:
+                pass
             _job_queue.task_done()
 
 
