@@ -6,6 +6,9 @@ uvicorn>=0.29.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
 
+# Object storage (stem-separation handoff — Plan 007)
+google-cloud-storage>=2.14.0
+
 # Pipeline core (driver.py / raga_pipeline)
 numpy>=2.0.0
 pandas>=2.0.0
