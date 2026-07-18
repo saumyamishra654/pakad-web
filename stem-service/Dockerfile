@@ -1,0 +1,7 @@
+FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY separator.py handler.py ./
+# htdemucs weights: prefer RunPod model caching / network volume over baking in.
+CMD ["python", "-u", "handler.py"]
