@@ -11,7 +11,81 @@ from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass, field
 
-from api import storage, firestore_client
+from api import storage, firestore_client, object_store, stem_client
+
+
+def _pipeline_timeout():
+    raw = os.environ.get("PIPELINE_TIMEOUT_SECONDS", "").strip()
+    return int(raw) if raw else None
+
+
+def _stem_dir(artifact_base: str, audio_path: str, model: str = "htdemucs") -> str:
+    basename = os.path.splitext(os.path.basename(audio_path))[0]
+    return os.path.join(artifact_base, model, basename)
+
+
+def _offload_stems(job: "Job", audio_path: str, artifact_base: str, params: dict) -> None:
+    """Pre-seed the local stem cache from the remote GPU worker (Plan 008).
+
+    No-op unless both stem_client and object_store are enabled. On failure,
+    cleans up the GCS handoff prefix and either swallows the error (falling
+    back to local separation inside driver.py) or re-raises, depending on
+    STEM_FALLBACK.
+    """
+    model = params.get("demucs_model", "htdemucs")
+    if not (stem_client.enabled() and object_store.enabled()):
+        return
+    _log(job.id, "[1b/4 Offload] Requesting remote stem separation")
+    _update_job(job.id, step="Separating stems (GPU)")
+    stem_dir = _stem_dir(artifact_base, audio_path, model)
+    os.makedirs(stem_dir, exist_ok=True)
+    ext = os.path.splitext(audio_path)[1] or ".mp3"
+    in_key = f"handoff/{job.id}/input{ext}"
+    voc_key = f"handoff/{job.id}/vocals.mp3"
+    acc_key = f"handoff/{job.id}/accompaniment.mp3"
+    try:
+        object_store.upload_file(audio_path, in_key)
+        stem_client.separate(
+            input_url=object_store.signed_get_url(in_key),
+            vocals_put_url=object_store.signed_put_url(voc_key, content_type="audio/mpeg"),
+            accompaniment_put_url=object_store.signed_put_url(acc_key, content_type="audio/mpeg"),
+            model=model,
+        )
+        object_store.download_file(voc_key, os.path.join(stem_dir, "vocals.mp3"))
+        object_store.download_file(acc_key, os.path.join(stem_dir, "accompaniment.mp3"))
+        _log(job.id, f"[1b/4 Offload] Stems cached at {stem_dir}")
+    except Exception as e:
+        if os.environ.get("STEM_FALLBACK", "local") == "fail":
+            raise RuntimeError(f"Remote stem separation failed: {e}")
+        _log(job.id, f"[1b/4 Offload] FAILED ({e}); falling back to local separation")
+    finally:
+        object_store.delete_prefix(f"handoff/{job.id}/")
+
+
+def _deliver_youtube_audio(job: "Job", audio_path: str, artifact_base: str, params: dict,
+                            audio_hash: str) -> None:
+    """Move audio-bearing files for a youtube-sourced song to a short-TTL
+    delivery buffer and remove them from the local artifact dir, so no
+    audio persists server-side for YouTube-sourced songs (legal posture,
+    decided 2026-07-13). Writes audioDelivery onto the analysis doc.
+    """
+    delivery = {}
+    ttl = int(os.environ.get("AUDIO_DELIVERY_TTL_SECONDS", "86400"))
+    stem_dir = _stem_dir(artifact_base, audio_path, params.get("demucs_model", "htdemucs"))
+    to_deliver = {
+        "original": audio_path,
+        "vocals": os.path.join(stem_dir, "vocals.mp3"),
+        "accompaniment": os.path.join(stem_dir, "accompaniment.mp3"),
+    }
+    for label, path in to_deliver.items():
+        if object_store.enabled() and os.path.exists(path):
+            key = f"delivery/{audio_hash}/{job.user_id}/{label}.mp3"
+            object_store.upload_file(path, key, content_type="audio/mpeg")
+            delivery[label] = object_store.signed_get_url(key, expires_seconds=ttl)
+        if path != audio_path and os.path.exists(path):
+            os.remove(path)  # delete server-side stems (audio-bearing)
+    firestore_client.update_analysis(job.song_id, job.analysis_id,
+        audioDelivery={"available": bool(delivery), "urls": delivery, "source": "youtube"})
 
 
 @dataclass
@@ -107,6 +181,9 @@ def _run_pipeline(job: Job) -> None:
     artifact_base = str(storage.ensure_dir(storage.artifact_dir(audio_hash)))
     _log(job.id, f"Artifact output dir: {artifact_base}")
 
+    # Offload stem separation to the remote GPU worker (Plan 008), if enabled.
+    _offload_stems(job, audio_path, artifact_base, params)
+
     env = os.environ.copy()
 
     # Build detect command
@@ -139,7 +216,7 @@ def _run_pipeline(job: Job) -> None:
     # Run detect
     _update_job(job.id, status="running", progress=0.1, step="Running distribution analysis")
     _log(job.id, f"[2/4 Detect] Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=_pipeline_timeout(), env=env)
     if result.stdout:
         for line in result.stdout.strip().split("\n"):
             _log(job.id, f"[2/4 Detect] stdout: {line}")
@@ -199,7 +276,7 @@ def _run_pipeline(job: Job) -> None:
 
     # Run analyze
     _log(job.id, f"[3/4 Analyze] Running: {' '.join(cmd_analyze)}")
-    result = subprocess.run(cmd_analyze, capture_output=True, text=True, timeout=3600, env=env)
+    result = subprocess.run(cmd_analyze, capture_output=True, text=True, timeout=_pipeline_timeout(), env=env)
     if result.stdout:
         for line in result.stdout.strip().split("\n"):
             _log(job.id, f"[3/4 Analyze] stdout: {line}")
@@ -221,23 +298,30 @@ def _run_pipeline(job: Job) -> None:
         results={"detectedRaga": detected_raga, "detectedTonic": detected_tonic},
         artifactPaths={"outputDir": artifact_base})
 
-    # Copy original audio into the artifact dir so it can be served as "original" track
-    import shutil
-    art_dir_for_original = glob.glob(f"{artifact_base}/**/vocals.mp3", recursive=True)
-    if art_dir_for_original:
-        stem_output_dir = str(Path(art_dir_for_original[0]).parent)
-        original_dest = os.path.join(stem_output_dir, "original.mp3")
-        if not os.path.exists(original_dest):
-            try:
-                shutil.copy2(audio_path, original_dest)
-                _log(job.id, f"[4/4 Finalize] Copied original audio to {original_dest}")
-            except Exception as e:
-                _log(job.id, f"[4/4 Finalize] WARN: failed to copy original audio: {e}")
-
-    # Cleanup YouTube temp files
     if source == "youtube":
+        # YouTube on-device audio (legal posture, decided 2026-07-13): never
+        # persist audio-bearing artifacts server-side. Deliver via a short-TTL
+        # GCS buffer instead, then delete local audio-bearing files.
+        _log(job.id, f"[4/4 Finalize] Delivering YouTube audio on-device (no server-side retention)")
+        _deliver_youtube_audio(job, audio_path, artifact_base, params, audio_hash)
+
+        # Cleanup YouTube temp files
         _log(job.id, f"[4/4 Finalize] Cleaning up temp YouTube audio")
         storage.cleanup_tmp(job.id)
+    else:
+        # Uploads: copy original audio into the artifact dir so it can be
+        # served as the "original" track. Stems remain in place (unchanged).
+        import shutil
+        art_dir_for_original = glob.glob(f"{artifact_base}/**/vocals.mp3", recursive=True)
+        if art_dir_for_original:
+            stem_output_dir = str(Path(art_dir_for_original[0]).parent)
+            original_dest = os.path.join(stem_output_dir, "original.mp3")
+            if not os.path.exists(original_dest):
+                try:
+                    shutil.copy2(audio_path, original_dest)
+                    _log(job.id, f"[4/4 Finalize] Copied original audio to {original_dest}")
+                except Exception as e:
+                    _log(job.id, f"[4/4 Finalize] WARN: failed to copy original audio: {e}")
 
     _log(job.id, f"Pipeline finished successfully for \"{title}\"")
 
