@@ -1,27 +1,44 @@
 FROM python:3.10-slim
 
-# Install system dependencies
+# ffmpeg/ffprobe: audio conversion, duration checks, YouTube ingest.
+#
+# NOTE: build this image for linux/amd64 (`docker build --platform linux/amd64
+# ...` or via this repo's docker-compose, which inherits the host/CI arch).
+# demucs depends on sphn (a Rust/PyO3 audio lib) that only ships prebuilt
+# wheels for linux/amd64, macOS, and Windows. On linux/arm64 (Apple Silicon
+# native builds, AWS Graviton) pip falls back to compiling sphn from source,
+# which additionally needs gcc/g++ and a pre-4.x cmake (for its bundled Opus
+# dependency) -- real toolchain weight we don't want on this image just to
+# support an architecture the production host doesn't use.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python dependencies
+# CPU torch as its own layer, from the CPU wheel index, so the pipeline's
+# torch/torchaudio requirement is satisfied without pulling the multi-GB CUDA
+# build. Real stem separation is offloaded to the remote GPU (stem-service/);
+# CPU demucs remains only for the STEM_FALLBACK=local path and local dev.
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Remaining deps (torch already satisfied above so it is not re-pulled).
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code (Docker COPY follows symlinks)
+# Application code + data assets read at runtime.
 COPY raga_pipeline/ raga_pipeline/
 COPY api/ api/
 COPY driver.py .
+COPY data/ data/
+COPY tanpura/ tanpura/
 
-# Create storage directory
 RUN mkdir -p /data
-
 ENV STORAGE_ROOT=/data
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8765
 
+# Demucs downloads htdemucs weights (~300MB) to ~/.cache on first LOCAL-fallback
+# run; the compose model-cache volume persists them across restarts.
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8765"]

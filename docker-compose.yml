@@ -1,26 +1,22 @@
-version: "3.8"
-
+# Split topology: the frontend is hosted separately (Vercel) and Demucs runs on
+# a remote GPU (RunPod), so this stack is just the API + nginx. The API binds to
+# loopback; only nginx publishes 80/443.
 services:
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
     ports:
-      - "8765:8765"
-    volumes:
-      - app-data:/data
+      - "127.0.0.1:8765:8765"
     env_file:
       - .env
-    restart: unless-stopped
-
-  web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    env_file:
-      - ./web/.env.production
+    environment:
+      # Override the host key path with the in-container mount below.
+      - FIREBASE_SERVICE_ACCOUNT_KEY=/secrets/firebase.json
+    volumes:
+      - app-data:/data
+      - model-cache:/root/.cache
+      - ${FIREBASE_KEY_FILE:?set FIREBASE_KEY_FILE in .env to your service-account json}:/secrets/firebase.json:ro
     restart: unless-stopped
 
   nginx:
@@ -29,11 +25,13 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
     depends_on:
       - api
-      - web
     restart: unless-stopped
 
 volumes:
   app-data:
+  model-cache:

@@ -1,4 +1,5 @@
 """Multi-user FastAPI backend for the Raga Detection web app."""
+import os
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -9,9 +10,13 @@ from api.routes import songs, analysis, artifacts, jobs, results, explore, comme
 
 app = FastAPI(title="Raga Detection API", version="1.0.0", description="Multi-user raga detection and analysis API")
 
+# CORS_ORIGINS: comma-separated list of admitted origins (e.g. the Vercel
+# frontend URL in production). Falls back to the local dev origin.
+_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

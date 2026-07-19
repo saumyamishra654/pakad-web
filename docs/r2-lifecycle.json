@@ -1,0 +1,16 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-handoff",
+      "Filter": { "Prefix": "handoff/" },
+      "Status": "Enabled",
+      "Expiration": { "Days": 1 }
+    },
+    {
+      "ID": "expire-delivery",
+      "Filter": { "Prefix": "delivery/" },
+      "Status": "Enabled",
+      "Expiration": { "Days": 1 }
+    }
+  ]
+}
