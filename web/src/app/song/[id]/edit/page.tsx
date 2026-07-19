@@ -61,7 +61,7 @@ export default function EditTranscriptionPage() {
             {/* Top section: Audio player + pitch contour */}
             {Object.keys(data.stems).length > 0 && (
               <div className="mb-8">
-                <AudioPlayer stems={data.stems} {...player} />
+                <AudioPlayer stems={data.stems} song={data.song} audioDelivery={data.audioDelivery} {...player} />
                 <PitchContour
                   songId={songId}
                   stem={player.activeStem}

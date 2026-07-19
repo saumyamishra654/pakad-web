@@ -2,6 +2,7 @@
  * FastAPI client with Firebase auth token injection.
  */
 import { auth } from "./firebase";
+import { getStemUrl } from "./localAudio";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -74,6 +75,32 @@ export async function reanalyze(
 
 export function audioUrl(songId: string, filename: string): string {
   return `${API_BASE}/api/artifacts/audio/${songId}/${filename}`;
+}
+
+/**
+ * Local-first audio resolution (Plan 011). YouTube audio is never persisted
+ * server-side (Plan 009), so for YouTube songs we only trust a blob already
+ * pulled onto this device; `null` means "not on this device yet" and callers
+ * should offer "Generate audio" instead of pointing at a stale/dead server URL.
+ * Uploads are unaffected and keep resolving to the server URL as before.
+ *
+ * label: "original" | "vocals" | "accompaniment"
+ */
+export async function resolveAudio(
+  song: { id: string; source: string; audioHash: string },
+  label: string,
+  serverUrl: string,
+): Promise<string | null> {
+  if (song.source === "youtube") {
+    return await getStemUrl(song.audioHash, label); // null if not on this device
+  }
+  return serverUrl; // uploads: server as today
+}
+
+/** Kick off a separation-only job that delivers audio to the requesting user's device (Plan 011). */
+export async function requestAudioJob(songId: string): Promise<{ jobId: string; status: string }> {
+  const res = await apiFetch(`/api/songs/${songId}/audio-job`, { method: "POST" });
+  return res.json();
 }
 
 export async function getPitchData(songId: string, stem: string = "vocals") {

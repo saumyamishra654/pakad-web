@@ -71,7 +71,7 @@ export default function SongResultsPage() {
         {Object.keys(data.stems).length > 0 && (
           <div className="mb-8">
             <h2 className="text-base font-semibold text-text-primary mb-3">Pitch Analysis</h2>
-            <AudioPlayer stems={data.stems} {...player} />
+            <AudioPlayer stems={data.stems} song={data.song} audioDelivery={data.audioDelivery} {...player} />
             <PitchContour
               songId={songId}
               tonicMidi={data.detection.tonicMidi}

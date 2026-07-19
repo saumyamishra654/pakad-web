@@ -5,6 +5,7 @@ subprocess calls to the real driver are made.
 """
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -331,3 +332,86 @@ def test_purge_youtube_local_removes_all_audio_files_and_is_idempotent(monkeypat
         assert not (stem_dir / name).exists()
     # Idempotent: a second call on already-clean state does not raise.
     jobs._purge_youtube_local(job, str(tmp_path / "audio.mp3"), artifact_base, {})
+
+
+# ---------------------------------------------------------------------------
+# _run_pipeline: mode == "audio_only" (Plan 011) takes the no-analyze branch
+# ---------------------------------------------------------------------------
+
+def test_run_pipeline_audio_only_skips_detect_and_analyze(monkeypatch, tmp_path):
+    """A viewer requesting audio regeneration for an already-analyzed YouTube
+    song must get separation + delivery only -- detect/analyze must never run,
+    and no subprocess should be spawned."""
+    from api.jobs import Job
+
+    job = Job(id="job-audio-only", song_id="song-1", analysis_id="analysis-1", user_id="user-2", params={"mode": "audio_only"})
+
+    song = {"id": "song-1", "title": "Some Bandish", "audioHash": "hash123", "source": "youtube", "youtubeVideoId": "abc123"}
+    monkeypatch.setattr(jobs.firestore_client, "get_song", lambda song_id: song)
+    monkeypatch.setattr(jobs.firestore_client, "get_analysis", lambda song_id, analysis_id: {"params": {"mode": "audio_only"}})
+
+    # Storage: avoid touching real disk -- return deterministic relative-ish paths.
+    monkeypatch.setattr(jobs.storage, "tmp_dir", lambda job_id: str(tmp_path / "tmp" / job_id))
+    monkeypatch.setattr(jobs.storage, "ensure_dir", lambda relative: tmp_path / "resolved" / relative if isinstance(relative, str) else relative)
+    monkeypatch.setattr(jobs.storage, "artifact_dir", lambda audio_hash: f"artifacts/{audio_hash}")
+    cleanup_calls = []
+    monkeypatch.setattr(jobs.storage, "cleanup_tmp", lambda job_id: cleanup_calls.append(job_id))
+
+    # YouTube download: stub out, don't actually hit the network.
+    import raga_pipeline.audio as audio_mod
+    fake_audio_path = str(tmp_path / "audio.mp3")
+    Path(fake_audio_path).write_bytes(b"fake")
+    monkeypatch.setattr(audio_mod, "download_youtube_audio", lambda **kwargs: fake_audio_path)
+
+    # _offload_stems and _deliver_youtube_audio: reuse Plan 009 helpers but
+    # verify they were called with the no-analyze branch's expected args.
+    offload_calls = []
+    deliver_calls = []
+    monkeypatch.setattr(jobs, "_offload_stems", lambda job_, audio_path, artifact_base, params: offload_calls.append((audio_path, artifact_base, params)))
+    monkeypatch.setattr(jobs, "_deliver_youtube_audio", lambda job_, audio_path, artifact_base, params, audio_hash: deliver_calls.append((audio_path, artifact_base, params, audio_hash)))
+
+    # If detect/analyze ran, subprocess.run would be invoked -- fail loudly if so.
+    def _unexpected_subprocess_run(*args, **kwargs):
+        raise AssertionError("subprocess.run must not be called for mode=='audio_only'")
+    monkeypatch.setattr(jobs.subprocess, "run", _unexpected_subprocess_run)
+
+    jobs._run_pipeline(job)
+
+    assert len(offload_calls) == 1
+    assert len(deliver_calls) == 1
+    assert deliver_calls[0][3] == "hash123"
+    assert cleanup_calls == ["job-audio-only"]
+
+
+def test_run_pipeline_audio_only_upload_source_no_delivery(monkeypatch, tmp_path):
+    """For a file-upload song, audio_only has nothing to deliver (uploads
+    already serve from the server) -- it should offload and return without
+    calling the YouTube delivery block or any subprocess."""
+    from api.jobs import Job
+
+    job = Job(id="job-audio-only-2", song_id="song-2", analysis_id="analysis-2", user_id="user-3", params={"mode": "audio_only"})
+
+    song = {"id": "song-2", "title": "Uploaded Song", "audioHash": "hash789", "source": "file"}
+    monkeypatch.setattr(jobs.firestore_client, "get_song", lambda song_id: song)
+    monkeypatch.setattr(jobs.firestore_client, "get_analysis", lambda song_id, analysis_id: {"params": {"mode": "audio_only"}})
+
+    upload_file = tmp_path / "upload" / "audio.mp3"
+    upload_file.parent.mkdir(parents=True)
+    upload_file.write_bytes(b"fake")
+    monkeypatch.setattr(jobs.storage, "upload_dir", lambda user_id, song_id: "uploads/rel")
+    monkeypatch.setattr(jobs.storage, "list_files", lambda relative_dir, pattern="*": [str(upload_file)] if pattern == "*.mp3" else [])
+    monkeypatch.setattr(jobs.storage, "get_absolute_path", lambda relative: Path(relative))
+    monkeypatch.setattr(jobs.storage, "ensure_dir", lambda relative: tmp_path / "resolved" / relative)
+    monkeypatch.setattr(jobs.storage, "artifact_dir", lambda audio_hash: f"artifacts/{audio_hash}")
+
+    offload_calls = []
+    monkeypatch.setattr(jobs, "_offload_stems", lambda job_, audio_path, artifact_base, params: offload_calls.append(audio_path))
+    monkeypatch.setattr(jobs, "_deliver_youtube_audio", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not deliver for upload source")))
+
+    def _unexpected_subprocess_run(*args, **kwargs):
+        raise AssertionError("subprocess.run must not be called for mode=='audio_only'")
+    monkeypatch.setattr(jobs.subprocess, "run", _unexpected_subprocess_run)
+
+    jobs._run_pipeline(job)
+
+    assert len(offload_calls) == 1

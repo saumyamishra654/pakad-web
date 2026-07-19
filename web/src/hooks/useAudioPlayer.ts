@@ -44,9 +44,15 @@ export function useAudioPlayer() {
     return () => cancelAnimationFrame(rafId);
   }, []);
 
-  const loadStem = useCallback((url: string, stem: string) => {
+  const loadStem = useCallback((url: string | null, stem: string) => {
     const audio = audioRef.current;
     if (!audio) return;
+    // No local/server URL available yet (e.g. YouTube audio not on this
+    // device) -- don't clobber the element with a broken src.
+    if (!url) {
+      setActiveStem(stem);
+      return;
+    }
     // Skip reload if already on the same URL
     if (audio.src && audio.src.endsWith(url)) {
       setActiveStem(stem);

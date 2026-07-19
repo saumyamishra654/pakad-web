@@ -2,9 +2,18 @@
 
 import { useState, useEffect } from "react";
 import { auth } from "@/lib/firebase";
+import { ingestDelivery } from "./useJob";
+import { hasStem } from "@/lib/localAudio";
+
+export interface AudioDelivery {
+  available: boolean;
+  urls: Record<string, string>;
+  source: string | null;
+}
 
 export interface ResultsData {
-  song: { id: string; title: string; source: string; youtubeVideoId: string | null; createdAt: string; uploadedBy: string; visibility: string };
+  song: { id: string; title: string; source: string; youtubeVideoId: string | null; audioHash: string; createdAt: string; uploadedBy: string; visibility: string };
+  audioDelivery: AudioDelivery;
   detection: { raga: string | null; tonic: string | null; tonicMidi: number | null; confidence: number | null };
   ragaInfo: { name?: string; aroha?: string; avroh?: string };
   candidates: { raga: string; tonic: string; score: number; rank: number }[];
@@ -63,8 +72,22 @@ export function useResults(songId: string) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.detail || `Error ${res.status}`);
         }
-        setData(await res.json());
+        const payload: ResultsData = await res.json();
+        setData(payload);
         setError(null);
+
+        // Local-first audio hand-off (Plan 011): on first load after a
+        // delivery/audio_only job completes, the analysis doc carries a
+        // short-TTL audioDelivery buffer. Pull it into IndexedDB once so
+        // subsequent playback never depends on that buffer's TTL.
+        const delivery = payload.audioDelivery;
+        const audioHash = payload.song?.audioHash;
+        if (delivery?.available && audioHash) {
+          const alreadyLocal = await hasStem(audioHash, Object.keys(delivery.urls)[0] || "original");
+          if (!alreadyLocal) {
+            await ingestDelivery(audioHash, delivery);
+          }
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load results");
       } finally {

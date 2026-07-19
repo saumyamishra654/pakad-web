@@ -234,6 +234,15 @@ async def get_results(
     audio_hash = song.get("audioHash", "")
     art_dir = _find_artifact_dir(audio_hash)
 
+    # -- Audio delivery (Plan 009/011): YouTube audio is never persisted
+    # server-side. The canonical analysis carries a short-TTL audioDelivery
+    # buffer once a completed job has handed audio off; surface it so the
+    # frontend can pull it into local (IndexedDB) storage.
+    canonical_analysis = firestore_client.get_canonical_analysis(song_id)
+    audio_delivery = (canonical_analysis or {}).get("audioDelivery") or {
+        "available": False, "urls": {}, "source": song.get("source"),
+    }
+
     # -- Detection metadata --
     detect_meta = _read_json(f"{art_dir}/detection_report.meta.json") or {}
     detected = detect_meta.get("detected", {})
@@ -347,10 +356,12 @@ async def get_results(
             "title": song.get("title"),
             "source": song.get("source"),
             "youtubeVideoId": song.get("youtubeVideoId"),
+            "audioHash": audio_hash,
             "createdAt": str(song.get("createdAt", "")),
             "uploadedBy": song.get("uploadedBy"),
             "visibility": song.get("visibility", "private"),
         },
+        "audioDelivery": audio_delivery,
         "detection": {
             "raga": detected.get("selected_raga") or detected.get("top_raga"),
             "tonic": detected.get("top_tonic_name"),

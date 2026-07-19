@@ -220,6 +220,19 @@ def _run_pipeline(job: Job) -> None:
     # Offload stem separation to the remote GPU worker (Plan 008), if enabled.
     _offload_stems(job, audio_path, artifact_base, params)
 
+    if params.get("mode") == "audio_only":
+        # Separation-only regeneration (Plan 011): a viewer of an already-
+        # analyzed song wants audio on their device. Detect/analyze already
+        # ran (and are cached in the canonical analysis); do not re-run them.
+        _log(job.id, "[audio_only] Delivering audio to requesting user (no re-analysis)")
+        _update_job(job.id, progress=0.5, step="Separating stems")
+        if source == "youtube":
+            _deliver_youtube_audio(job, audio_path, artifact_base, params, audio_hash)
+            storage.cleanup_tmp(job.id)
+        _update_job(job.id, progress=1.0, step="Finalizing")
+        _log(job.id, f"[audio_only] Complete for \"{title}\"")
+        return
+
     env = os.environ.copy()
 
     # Build detect command

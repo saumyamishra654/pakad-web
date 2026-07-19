@@ -1,4 +1,4 @@
-export type SongSource = "youtube" | "file";
+export type SongSource = "youtube" | "file" | "recording";
 export type SongVisibility = "public" | "private";
 export type SongStatus = "processing" | "complete" | "failed";
 export type SongType = "classical" | "semi-classical" | "filmy";
