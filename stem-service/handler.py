@@ -10,8 +10,8 @@ from separator import separate
 
 SECRET = os.environ["STEM_SERVICE_SECRET"]
 # Only fetch/upload from the object store we hand out signed URLs for.
-# Override for S3/R2 (e.g. "amazonaws.com", "r2.cloudflarestorage.com").
-ALLOWED_URL_HOST_SUFFIX = os.environ.get("ALLOWED_URL_HOST_SUFFIX", "storage.googleapis.com")
+# Default is Cloudflare R2; override for S3/GCS (e.g. "amazonaws.com").
+ALLOWED_URL_HOST_SUFFIX = os.environ.get("ALLOWED_URL_HOST_SUFFIX", "r2.cloudflarestorage.com")
 ALLOWED_MODELS = {"htdemucs", "htdemucs_ft", "htdemucs_6s", "mdx_extra", "mdx_extra_q"}
 
 
