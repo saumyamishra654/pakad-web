@@ -216,14 +216,15 @@ def test_offload_object_store_disabled_makes_no_calls(monkeypatch, tmp_path):
 # _deliver_youtube_audio
 # ---------------------------------------------------------------------------
 
-def test_deliver_youtube_audio_uploads_and_deletes_local_files(monkeypatch, tmp_path):
+def test_deliver_youtube_audio_uploads_to_per_user_prefix_and_deletes_local(monkeypatch, tmp_path):
     fake_store = FakeObjectStore(is_enabled=True)
     monkeypatch.setattr(jobs, "object_store", fake_store)
 
-    updates = []
+    # Delivery must NOT write URLs to the shared analysis doc (that leaked one
+    # user's audio to every viewer). If it does, fail loudly.
     monkeypatch.setattr(
         jobs.firestore_client, "update_analysis",
-        lambda song_id, analysis_id, **fields: updates.append((song_id, analysis_id, fields)),
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("delivery must not write audioDelivery")),
     )
 
     artifact_base = str(tmp_path / "artifacts" / "h")
@@ -237,52 +238,40 @@ def test_deliver_youtube_audio_uploads_and_deletes_local_files(monkeypatch, tmp_
     job = _job(job_id="job-yt", user_id="user-yt", song_id="song-yt", analysis_id="an-yt")
     jobs._deliver_youtube_audio(job, str(audio_path), artifact_base, {}, "hash123")
 
-    # All three audio-bearing files uploaded
+    # All three files uploaded under THIS user's private prefix.
     uploaded_keys = {k for _, k, _ in fake_store.uploaded}
     assert uploaded_keys == {
         "delivery/hash123/user-yt/original.mp3",
         "delivery/hash123/user-yt/vocals.mp3",
         "delivery/hash123/user-yt/accompaniment.mp3",
     }
+    # No presigned URLs minted at delivery time (results endpoint mints them
+    # per-request for the matching user only).
+    assert fake_store.signed_get_calls == []
 
-    # Stems deleted locally (audio_path itself is left for the existing
-    # cleanup_tmp() call to remove -- see to_deliver's "path != audio_path" guard)
+    # Stems deleted locally; audio_path left for cleanup_tmp.
     assert not (stem_dir / "vocals.mp3").exists()
     assert not (stem_dir / "accompaniment.mp3").exists()
     assert audio_path.exists()
 
-    # Firestore updated with audioDelivery
-    assert len(updates) == 1
-    song_id, analysis_id, fields = updates[0]
-    assert song_id == "song-yt"
-    assert analysis_id == "an-yt"
-    delivery = fields["audioDelivery"]
-    assert delivery["available"] is True
-    assert delivery["source"] == "youtube"
-    assert set(delivery["urls"].keys()) == {"original", "vocals", "accompaniment"}
 
-
-def test_deliver_youtube_audio_object_store_disabled_still_updates_firestore(monkeypatch, tmp_path):
+def test_deliver_youtube_audio_object_store_disabled_uploads_nothing(monkeypatch, tmp_path):
     fake_store = FakeObjectStore(is_enabled=False)
     monkeypatch.setattr(jobs, "object_store", fake_store)
-
-    updates = []
-    monkeypatch.setattr(
-        jobs.firestore_client, "update_analysis",
-        lambda song_id, analysis_id, **fields: updates.append((song_id, analysis_id, fields)),
-    )
 
     artifact_base = str(tmp_path / "artifacts" / "h")
     audio_path = tmp_path / "audio.mp3"
     audio_path.write_bytes(b"orig")
+    stem_dir = tmp_path / "artifacts" / "h" / "htdemucs" / "audio"
+    stem_dir.mkdir(parents=True)
+    (stem_dir / "vocals.mp3").write_bytes(b"voc")
 
-    job = _job(job_id="job-yt2", user_id="user-yt2", song_id="song-yt2", analysis_id="an-yt2")
+    job = _job(job_id="job-yt2", user_id="user-yt2")
     jobs._deliver_youtube_audio(job, str(audio_path), artifact_base, {}, "hash456")
 
+    # Nothing uploaded, but local stems still purged (no server-side retention).
     assert fake_store.uploaded == []
-    delivery = updates[0][2]["audioDelivery"]
-    assert delivery["available"] is False
-    assert delivery["urls"] == {}
+    assert not (stem_dir / "vocals.mp3").exists()
 
 
 def test_deliver_youtube_audio_deletes_local_stems_even_when_upload_fails(monkeypatch, tmp_path):
@@ -294,11 +283,6 @@ def test_deliver_youtube_audio_deletes_local_stems_even_when_upload_fails(monkey
 
     fake_store = RaisingStore(is_enabled=True)
     monkeypatch.setattr(jobs, "object_store", fake_store)
-    updates = []
-    monkeypatch.setattr(
-        jobs.firestore_client, "update_analysis",
-        lambda song_id, analysis_id, **fields: updates.append(fields),
-    )
 
     artifact_base = str(tmp_path / "artifacts" / "h")
     audio_path = tmp_path / "audio.mp3"
@@ -314,8 +298,61 @@ def test_deliver_youtube_audio_deletes_local_stems_even_when_upload_fails(monkey
     # Stems are gone despite the upload failure -- no server-side audio left.
     assert not (stem_dir / "vocals.mp3").exists()
     assert not (stem_dir / "accompaniment.mp3").exists()
-    # Delivery reported unavailable (nothing uploaded successfully).
-    assert updates[-1]["audioDelivery"]["available"] is False
+
+
+# ---------------------------------------------------------------------------
+# results._resolve_audio_delivery: per-user privacy (no cross-user audio leak)
+# ---------------------------------------------------------------------------
+
+class _DeliveryStore:
+    """Object store where only `owner_uid`'s prefix has delivered objects."""
+    def __init__(self, owner_uid):
+        self.owner_uid = owner_uid
+
+    def enabled(self):
+        return True
+
+    def exists(self, key):
+        return f"/{self.owner_uid}/" in key
+
+    def signed_get_url(self, key, expires_seconds=3600):
+        return f"https://signed/{key}"
+
+
+def test_resolve_audio_delivery_owner_gets_own_urls(monkeypatch):
+    from api.routes import results
+    monkeypatch.setattr(results, "object_store", _DeliveryStore("owner-1"))
+    song = {"source": "youtube", "uploadedBy": "owner-1"}
+    out = results._resolve_audio_delivery(song, "hashX", {"uid": "owner-1"})
+    assert out["available"] is True
+    assert set(out["urls"].keys()) == {"original", "vocals", "accompaniment"}
+
+
+def test_resolve_audio_delivery_other_user_gets_nothing(monkeypatch):
+    """The core privacy fix: a different viewer of a (public) YouTube song must
+    NOT receive the uploader's audio."""
+    from api.routes import results
+    monkeypatch.setattr(results, "object_store", _DeliveryStore("owner-1"))
+    song = {"source": "youtube", "uploadedBy": "owner-1"}
+    out = results._resolve_audio_delivery(song, "hashX", {"uid": "someone-else"})
+    assert out["available"] is False
+    assert out["urls"] == {}
+
+
+def test_resolve_audio_delivery_unauthenticated_gets_nothing(monkeypatch):
+    from api.routes import results
+    monkeypatch.setattr(results, "object_store", _DeliveryStore("owner-1"))
+    song = {"source": "youtube", "uploadedBy": "owner-1"}
+    out = results._resolve_audio_delivery(song, "hashX", None)
+    assert out["available"] is False
+
+
+def test_resolve_audio_delivery_non_youtube_is_empty(monkeypatch):
+    from api.routes import results
+    monkeypatch.setattr(results, "object_store", _DeliveryStore("owner-1"))
+    song = {"source": "file", "uploadedBy": "owner-1"}
+    out = results._resolve_audio_delivery(song, "hashX", {"uid": "owner-1"})
+    assert out["available"] is False
 
 
 def test_purge_youtube_local_removes_all_audio_files_and_is_idempotent(monkeypatch, tmp_path):

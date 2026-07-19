@@ -4,13 +4,14 @@ import csv
 import io
 import json
 import glob
+import os
 import re
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from api.auth import get_optional_user
-from api import storage, firestore_client
+from api import storage, firestore_client, object_store
 
 router = APIRouter(prefix="/api/results", tags=["results"])
 
@@ -70,6 +71,28 @@ def _find_artifact_dir(audio_hash: str) -> Optional[str]:
     if nested:
         return str(Path(nested[0]).parent)
     return base
+
+
+def _resolve_audio_delivery(song: dict, audio_hash: str, user: Optional[dict]) -> dict:
+    """Mint delivery URLs for the requesting user's OWN buffer only.
+
+    YouTube audio lives at delivery/{hash}/{user_id}/{label}.mp3, uploaded by
+    that user's own job. We only ever sign URLs for the caller's prefix, so a
+    public song never leaks the uploader's (or anyone else's) audio. Returns
+    available=False (frontend offers "Generate audio") when the caller has no
+    buffer of their own, is unauthenticated, or the source isn't YouTube.
+    """
+    empty = {"available": False, "urls": {}, "source": song.get("source")}
+    uid = (user or {}).get("uid")
+    if song.get("source") != "youtube" or not uid or not object_store.enabled():
+        return empty
+    ttl = int(os.environ.get("AUDIO_DELIVERY_TTL_SECONDS", "86400"))
+    urls = {}
+    for label in ("original", "vocals", "accompaniment"):
+        key = f"delivery/{audio_hash}/{uid}/{label}.mp3"
+        if object_store.exists(key):
+            urls[label] = object_store.signed_get_url(key, expires_seconds=ttl)
+    return {"available": bool(urls), "urls": urls, "source": "youtube"}
 
 
 def _gaussian_smooth(values: list[float], sigma: float = 0.8) -> list[float]:
@@ -235,13 +258,10 @@ async def get_results(
     art_dir = _find_artifact_dir(audio_hash)
 
     # -- Audio delivery (Plan 009/011): YouTube audio is never persisted
-    # server-side. The canonical analysis carries a short-TTL audioDelivery
-    # buffer once a completed job has handed audio off; surface it so the
-    # frontend can pull it into local (IndexedDB) storage.
-    canonical_analysis = firestore_client.get_canonical_analysis(song_id)
-    audio_delivery = (canonical_analysis or {}).get("audioDelivery") or {
-        "available": False, "urls": {}, "source": song.get("source"),
-    }
+    # server-side. It is delivered to the REQUESTING USER's private buffer only,
+    # so a public song shows analysis to everyone but hands audio to no one but
+    # the user who supplied (or regenerated) it.
+    audio_delivery = _resolve_audio_delivery(song, audio_hash, user)
 
     # -- Detection metadata --
     detect_meta = _read_json(f"{art_dir}/detection_report.meta.json") or {}

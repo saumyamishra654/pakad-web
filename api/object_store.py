@@ -66,6 +66,15 @@ def download_file(key: str, local_path: str) -> None:
     _s3().download_file(_BUCKET, key, local_path)
 
 
+def exists(key: str) -> bool:
+    """True if an object exists at the key (used to resolve per-user delivery)."""
+    try:
+        _s3().head_object(Bucket=_BUCKET, Key=key)
+        return True
+    except Exception:
+        return False
+
+
 def signed_get_url(key: str, expires_seconds: int = 3600) -> str:
     """Short-lived presigned GET URL for an existing object."""
     return _s3().generate_presigned_url(

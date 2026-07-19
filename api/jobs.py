@@ -64,25 +64,29 @@ def _offload_stems(job: "Job", audio_path: str, artifact_base: str, params: dict
 
 def _deliver_youtube_audio(job: "Job", audio_path: str, artifact_base: str, params: dict,
                             audio_hash: str) -> None:
-    """Move audio-bearing files for a youtube-sourced song to a short-TTL
-    delivery buffer and remove them from the local artifact dir, so no
-    audio persists server-side for YouTube-sourced songs (legal posture,
-    decided 2026-07-13). Writes audioDelivery onto the analysis doc.
+    """Upload audio-bearing files to the REQUESTING USER's private delivery
+    prefix (delivery/{hash}/{user_id}/...) and remove them from local disk.
+
+    URLs are minted per-request in the results endpoint for the matching user
+    only (see results._resolve_audio_delivery), so one user's audio is never
+    exposed to another -- critical for public songs, where anyone can read the
+    analysis but only the person who supplied the source may get the audio.
+    No audio persists server-side outside this per-user buffer (legal posture,
+    decided 2026-07-13).
     """
-    delivery = {}
-    ttl = int(os.environ.get("AUDIO_DELIVERY_TTL_SECONDS", "86400"))
     stem_dir = _stem_dir(artifact_base, audio_path, params.get("demucs_model", "htdemucs"))
     to_deliver = {
         "original": audio_path,
         "vocals": os.path.join(stem_dir, "vocals.mp3"),
         "accompaniment": os.path.join(stem_dir, "accompaniment.mp3"),
     }
+    delivered = []
     for label, path in to_deliver.items():
         try:
             if object_store.enabled() and os.path.exists(path):
                 key = f"delivery/{audio_hash}/{job.user_id}/{label}.mp3"
                 object_store.upload_file(path, key, content_type="audio/mpeg")
-                delivery[label] = object_store.signed_get_url(key, expires_seconds=ttl)
+                delivered.append(label)
         except Exception as e:
             # Delivery is best-effort; the user can regenerate audio on demand
             # (Plan 011). A failed upload must NOT fail the analysis job.
@@ -93,8 +97,7 @@ def _deliver_youtube_audio(job: "Job", audio_path: str, artifact_base: str, para
             # download, purged separately by cleanup_tmp / _purge_youtube_local.)
             if path != audio_path and os.path.exists(path):
                 os.remove(path)
-    firestore_client.update_analysis(job.song_id, job.analysis_id,
-        audioDelivery={"available": bool(delivery), "urls": delivery, "source": "youtube"})
+    _log(job.id, f"[4/4 Finalize] Delivered {delivered} to user {job.user_id[:8]}'s buffer")
 
 
 def _purge_youtube_local(job: "Job", audio_path: str, artifact_base: str, params: dict) -> None:
