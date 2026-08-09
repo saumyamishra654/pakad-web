@@ -3,6 +3,7 @@
  */
 import { auth } from "./firebase";
 import { getStemUrl } from "./localAudio";
+import type { ResultsData } from "@/hooks/useResults";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -100,6 +101,12 @@ export async function resolveAudio(
 /** Kick off a separation-only job that delivers audio to the requesting user's device (Plan 011). */
 export async function requestAudioJob(songId: string): Promise<{ jobId: string; status: string }> {
   const res = await apiFetch(`/api/songs/${songId}/audio-job`, { method: "POST" });
+  return res.json();
+}
+
+/** Re-fetch the results payload (used to pull a freshly-delivered audioDelivery buffer). */
+export async function getResults(songId: string): Promise<ResultsData> {
+  const res = await apiFetch(`/api/results/${songId}`);
   return res.json();
 }
 

@@ -1760,3 +1760,72 @@ def tokenize_notes_for_lm(
         token_phrases.append(current_phrase)
 
     return token_phrases
+
+
+def tokenize_notes_for_lm_with_map(
+    notes: List[Note],
+    tonic_midi: float,
+    phrase_gap_sec: float = 0.25,
+    include_direction: bool = False,
+    phrases: Optional[List["Phrase"]] = None,
+) -> Tuple[List[List[str]], List[tuple]]:
+    """Like ``tokenize_notes_for_lm`` but also returns a note map.
+
+    Returns ``(token_phrases, note_map)`` where *note_map* is a list of
+    ``(phrase_idx, token_idx, note)`` entries, one per non-BOS token, so
+    evidence tokens can be mapped back to their originating :class:`Note`
+    (and its timestamps).  ``token_idx`` is the token's position within its
+    phrase list, i.e. index 0 is always ``<BOS>``.
+
+    Phrase boundaries follow the same two methods as
+    ``tokenize_notes_for_lm``: pre-computed *phrases* when provided,
+    otherwise gap-based splitting of *notes*.
+    """
+    tonic_rounded = int(round(tonic_midi))
+    token_phrases: List[List[str]] = []
+    note_map: List[tuple] = []
+
+    # --- Pre-computed phrases path ---
+    if phrases is not None:
+        for phrase in phrases:
+            if not phrase.notes:
+                continue
+            pi = len(token_phrases)
+            tokens: List[str] = ["<BOS>"]
+            prev_midi: Optional[int] = None
+            for note in phrase.notes:
+                tok, prev_midi = _tokenize_note(
+                    note, tonic_rounded, include_direction, prev_midi,
+                )
+                note_map.append((pi, len(tokens), note))
+                tokens.append(tok)
+            token_phrases.append(tokens)
+        return token_phrases, note_map
+
+    # --- Flat note list path (gap-based phrase detection) ---
+    if not notes:
+        return [], []
+
+    current_phrase: List[str] = []
+    prev_end: Optional[float] = None
+    prev_midi_val: Optional[int] = None
+
+    for note in notes:
+        if prev_end is None or (note.start - prev_end) > phrase_gap_sec:
+            if current_phrase:
+                token_phrases.append(current_phrase)
+            current_phrase = ["<BOS>"]
+            prev_midi_val = None  # reset direction at phrase boundary
+
+        pi = len(token_phrases)
+        tok, prev_midi_val = _tokenize_note(
+            note, tonic_rounded, include_direction, prev_midi_val,
+        )
+        note_map.append((pi, len(current_phrase), note))
+        current_phrase.append(tok)
+        prev_end = note.end
+
+    if current_phrase:
+        token_phrases.append(current_phrase)
+
+    return token_phrases, note_map

@@ -35,9 +35,13 @@ def _offload_stems(job: "Job", audio_path: str, artifact_base: str, params: dict
     model = params.get("demucs_model", "htdemucs")
     if not (stem_client.enabled() and object_store.enabled()):
         return
+    stem_dir = _stem_dir(artifact_base, audio_path, model)
+    if (os.path.exists(os.path.join(stem_dir, "vocals.mp3"))
+            and os.path.exists(os.path.join(stem_dir, "accompaniment.mp3"))):
+        _log(job.id, "[1b/4 Offload] Stems already cached; skipping remote separation")
+        return
     _log(job.id, "[1b/4 Offload] Requesting remote stem separation")
     _update_job(job.id, step="Separating stems (GPU)")
-    stem_dir = _stem_dir(artifact_base, audio_path, model)
     os.makedirs(stem_dir, exist_ok=True)
     ext = os.path.splitext(audio_path)[1] or ".mp3"
     in_key = f"handoff/{job.id}/input{ext}"
@@ -50,6 +54,7 @@ def _offload_stems(job: "Job", audio_path: str, artifact_base: str, params: dict
             vocals_put_url=object_store.signed_put_url(voc_key, content_type="audio/mpeg"),
             accompaniment_put_url=object_store.signed_put_url(acc_key, content_type="audio/mpeg"),
             model=model,
+            poll_timeout=_pipeline_timeout(),
         )
         object_store.download_file(voc_key, os.path.join(stem_dir, "vocals.mp3"))
         object_store.download_file(acc_key, os.path.join(stem_dir, "accompaniment.mp3"))
@@ -173,7 +178,11 @@ def _run_pipeline(job: Job) -> None:
 
     # Fetch analysis params early (needed for YouTube trimming)
     analysis = firestore_client.get_analysis(job.song_id, job.analysis_id)
-    params = analysis.get("params", {}) if analysis else {}
+    # Overlay job.params (e.g. mode=audio_only) on top of the canonical
+    # analysis params, so request-time flags aren't discarded while
+    # demucs_model/start_time/end_time/tonic/raga still come from the analysis.
+    params = dict(analysis.get("params", {}) if analysis else {})
+    params.update(job.params or {})
 
     # Determine audio file path
     if source == "youtube":

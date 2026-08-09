@@ -289,6 +289,72 @@ class NgramModel:
 
         return total_ll / total_weight if total_weight > 0 else 0.0
 
+    def score_sequence_with_evidence(
+        self, raga: str, phrases: List[List[str]]
+    ) -> Tuple[float, List[dict]]:
+        """Like ``score_sequence`` but also returns per-token evidence.
+
+        Returns ``(score, evidence)`` where *evidence* is a list of dicts,
+        one per scored token position::
+
+            {
+                "phrase_idx": int,
+                "token_idx": int,
+                "token": str,
+                "ngram": tuple of str,
+                "order": int,
+                "entropy_weight": float,
+                "log_prob": float,
+                "contribution": float,
+            }
+        """
+        if phrases and isinstance(phrases[0], str):
+            phrases = [phrases]  # type: ignore[list-item]
+
+        total_ll = 0.0
+        total_weight = 0.0
+        evidence: List[dict] = []
+
+        for pi, phrase in enumerate(phrases):
+            if len(phrase) < 2:
+                continue
+            for i in range(1, len(phrase)):
+                token = phrase[i]
+                ctx_start = max(0, i - (self.order - 1))
+                context = tuple(phrase[ctx_start:i])
+                ll = self.log_prob(raga, token, context)
+
+                w = 1.0
+                matched_ngram = (token,)
+                matched_order = 1
+                if self.use_entropy_weights and hasattr(self, '_entropy_weights') and self._entropy_weights:
+                    ngram = context + (token,)
+                    for n in range(min(len(ngram), self.order), 0, -1):
+                        sub = ngram[-n:]
+                        ew = self._entropy_weights.get(n, {}).get(sub)
+                        if ew is not None:
+                            w = ew
+                            matched_ngram = sub
+                            matched_order = n
+                            break
+
+                total_ll += w * ll
+                total_weight += w
+
+                evidence.append({
+                    "phrase_idx": pi,
+                    "token_idx": i,
+                    "token": token,
+                    "ngram": matched_ngram,
+                    "order": matched_order,
+                    "entropy_weight": w,
+                    "log_prob": ll,
+                    "contribution": w * ll,
+                })
+
+        score = total_ll / total_weight if total_weight > 0 else 0.0
+        return score, evidence
+
     def rank_ragas(self, phrases: List[List[str]]) -> List[Tuple[str, float]]:
         """Score *tokens* against every raga; return sorted (raga, score) pairs.
 

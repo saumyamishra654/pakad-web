@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import Optional
 from api.auth import get_current_user, get_optional_user
 from api import firestore_client
+from api.routes.results import require_song_access
 from pydantic import BaseModel
 
 
@@ -17,21 +18,14 @@ router = APIRouter(prefix="/api/songs/{song_id}/comments", tags=["comments"])
 
 @router.get("")
 async def list_comments(song_id: str, user: Optional[dict] = Depends(get_optional_user)):
-    song = firestore_client.get_song(song_id)
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
-    if song["visibility"] == "private":
-        if not user or user["uid"] != song["uploadedBy"]:
-            raise HTTPException(status_code=403, detail="Access denied")
+    require_song_access(song_id, user)
     comments = firestore_client.list_comments(song_id)
     return {"comments": comments}
 
 
 @router.post("")
 async def create_comment(song_id: str, body: CommentCreate, user: dict = Depends(get_current_user)):
-    song = firestore_client.get_song(song_id)
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
+    require_song_access(song_id, user)
     comment_id = firestore_client.create_comment(
         song_id=song_id,
         author_id=user["uid"],

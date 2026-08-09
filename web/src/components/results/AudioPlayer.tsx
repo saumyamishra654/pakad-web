@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { resolveAudio, requestAudioJob } from "@/lib/api";
+import { resolveAudio, requestAudioJob, getResults } from "@/lib/api";
 import { ingestDelivery, useJobPolling } from "@/hooks/useJob";
 import { AudioDelivery } from "@/hooks/useResults";
 
@@ -99,12 +99,9 @@ export function AudioPlayer({
         // the job just completed -- but the URLs live on the analysis doc, not
         // the job status, so pull the freshest copy via the results payload.
         try {
-          const res = await fetch(`/api/results/${song.id}`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.audioDelivery?.available) {
-              await ingestDelivery(song.audioHash, data.audioDelivery);
-            }
+          const data = await getResults(song.id);
+          if (data.audioDelivery?.available) {
+            await ingestDelivery(song.audioHash, data.audioDelivery);
           }
         } catch {
           /* best-effort; user can retry Generate audio */

@@ -33,17 +33,21 @@ export async function putStem(audioHash: string, label: string, blob: Blob) {
   });
 }
 
-export async function getStemUrl(audioHash: string, label: string): Promise<string | null> {
+async function getStemBlob(audioHash: string, label: string): Promise<Blob | undefined> {
   const db = await open();
-  const blob: Blob | undefined = await new Promise((res, rej) => {
+  return new Promise((res, rej) => {
     const tx = db.transaction(STORE, "readonly");
     const g = tx.objectStore(STORE).get(key(audioHash, label));
     g.onsuccess = () => res(g.result);
     g.onerror = () => rej(g.error);
   });
+}
+
+export async function getStemUrl(audioHash: string, label: string): Promise<string | null> {
+  const blob = await getStemBlob(audioHash, label);
   return blob ? URL.createObjectURL(blob) : null;
 }
 
 export async function hasStem(audioHash: string, label: string): Promise<boolean> {
-  return (await getStemUrl(audioHash, label)) !== null;
+  return (await getStemBlob(audioHash, label)) !== undefined;
 }

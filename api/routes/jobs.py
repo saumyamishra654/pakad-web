@@ -33,6 +33,8 @@ async def request_audio_job(song_id: str, user: dict = Depends(get_current_user)
         raise HTTPException(status_code=404, detail="Song not found")
     if song.get("visibility") == "private" and user["uid"] != song.get("uploadedBy"):
         raise HTTPException(status_code=403, detail="Access denied")
+    if song.get("source") != "youtube":
+        raise HTTPException(status_code=400, detail="Audio regeneration is only available for YouTube songs")
 
     canonical = get_canonical_analysis(song_id)
     if not canonical:

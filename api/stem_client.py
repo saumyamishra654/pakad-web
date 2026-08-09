@@ -1,6 +1,7 @@
 """Thin client for the remote stem-separation service (Plan 008)."""
 import os
 import time
+from typing import Optional
 import requests
 
 _URL = os.environ.get("STEM_SERVICE_URL", "").strip()
@@ -13,11 +14,15 @@ def enabled() -> bool:
 
 
 def separate(input_url: str, vocals_put_url: str, accompaniment_put_url: str,
-             model: str = "htdemucs", poll_timeout: int = 3600) -> None:
+             model: str = "htdemucs", poll_timeout: Optional[int] = 3600) -> None:
     """Call the RunPod endpoint and block until separation finishes.
 
     Uses RunPod's /runsync when the endpoint supports it; otherwise submit to
     /run and poll /status/{id}. Raises on failure.
+
+    poll_timeout is passed straight through to requests as the client-side
+    timeout; None means wait indefinitely (mirrors _pipeline_timeout(), so the
+    GPU call can inherit the same cap/uncap as the pipeline subprocess).
     """
     payload = {"input": {
         "input_url": input_url,
